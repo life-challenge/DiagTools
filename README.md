@@ -42,6 +42,8 @@
 
 ### 报文分析
 - CAN / UDS Trace 双视图、原始报文手工发送
+- **标准格式导出**：ASC/BLF（CAN，CANoe可读）、pcap（DoIP，
+  Wireshark可读），便于分享给他人分析
 - **报文重放**：CSV/HEX 文件、固定间隔或原始时序、循环次数
 - **DBC 数据库**：BO_/SG_ 解析，大小端 + 有符号信号物理值解码，
   CAN Trace 实时联动显示

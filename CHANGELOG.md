@@ -3,6 +3,24 @@
 本文件记录 DiagTools 各版本的重要变更，格式遵循
 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)。
 
+## [1.3.0] - 2026-08-31
+
+### 新增
+- Trace标准格式导出（发给他人在CANoe/Wireshark中分析）:
+  - **ASC** (Vector ASCII) / **BLF** (Vector二进制) — CAN报文，
+    经python-can写入，CANoe原生可读；BLF导出后回读验证
+  - **pcap** — DoIP/以太网报文，手工重建完整报文链
+    (Ethernet+IPv4+UDP 13400+DoIP诊断消息，含正确IPv4校验和)，
+    Wireshark原生可读
+  - 导出入口: 报文分析/底部日志面板的"导出"按钮，
+    按扩展名自动选择格式，DoIP逻辑地址自动携带
+- 连接面板命名修正: "CAN接口配置"→"通信接口配置"（下拉含DoIP）
+- DoIP"本地虚拟ECU（回环模拟）"勾选项: 连接时自动在本机
+  TCP端口启动虚拟ECU，无硬件即可本地测试；断开自动回收
+
+### 变更
+- 导出完成/失败增加结果提示弹窗
+
 ## [1.2.0] - 2026-08-31
 
 ### 新增

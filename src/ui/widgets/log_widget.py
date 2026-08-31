@@ -3,7 +3,7 @@
 from PyQt6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QTableWidget, QTableWidgetItem,
     QHeaderView, QPushButton, QLineEdit, QComboBox, QLabel, QCheckBox,
-    QFileDialog, QMenu, QApplication
+    QFileDialog, QMenu, QApplication, QMessageBox
 )
 from PyQt6.QtCore import Qt, pyqtSignal, QThread, QMutex
 from PyQt6.QtGui import QColor, QFont, QAction
@@ -54,6 +54,9 @@ class LogWidget(QWidget):
         self._rx_count = 0
         self._error_count = 0
         self._mutex = QMutex()
+        # DoIP会话逻辑地址上下文: (tester_addr, ecu_addr)，
+        # 供pcap导出重建以太网帧；CAN会话为None
+        self._doip_context = None
 
         self._init_ui()
         self._connect_signals()
@@ -185,6 +188,14 @@ class LogWidget(QWidget):
         """添加一条报文记录（线程安全，可从任意线程调用）"""
         entry = LogEntry(time.time(), direction, can_id, data, description, is_error)
         self.message_received.emit(entry)
+
+    def set_doip_context(self, tester_addr: int, ecu_addr: int):
+        """设置DoIP会话逻辑地址（pcap导出时重建以太网帧用）"""
+        self._doip_context = (tester_addr, ecu_addr)
+
+    def clear_doip_context(self):
+        """清除DoIP上下文（断开连接时调用）"""
+        self._doip_context = None
 
     def _on_entry_received(self, entry: LogEntry):
         """GUI线程中处理新条目"""
@@ -376,17 +387,29 @@ class LogWidget(QWidget):
         self._lbl_errors.setText(f"错误: {self._error_count}")
 
     def _export_log(self):
-        """导出日志"""
+        """导出日志（按扩展名选择格式: ASC/BLF/pcap/CSV/文本）"""
+        from src.utils.trace_exporter import export_entries
         filepath, _ = QFileDialog.getSaveFileName(
-            self, "导出日志", "diag_log.csv", "CSV文件 (*.csv);;文本文件 (*.txt)"
+            self, "导出日志", "diag_log.asc",
+            "CANoe ASC日志 (*.asc);;Vector BLF日志 (*.blf);;"
+            "DoIP pcap抓包 (*.pcap);;CSV文件 (*.csv);;文本文件 (*.txt)"
         )
         if not filepath:
             return
 
-        with open(filepath, "w", encoding="utf-8") as f:
-            f.write("时间,方向,CAN ID,数据,描述\n")
-            for entry in self._entries:
-                f.write(f"{entry.time_str},{entry.direction},0x{entry.can_id:03X},{entry.data_hex},{entry.description}\n")
+        entries = self._entries + self._paused_entries
+        try:
+            fmt = export_entries(entries, filepath, self._doip_context)
+        except Exception as e:
+            QMessageBox.warning(self, "导出失败", f"导出失败:\n{e}")
+            return
+        if not fmt:
+            QMessageBox.warning(
+                self, "导出失败", "不支持的文件格式，请使用 asc/blf/pcap/csv/txt 扩展名")
+            return
+        QMessageBox.information(
+            self, "导出完成",
+            f"已导出 {len(entries)} 条记录为 {fmt} 格式:\n{filepath}")
 
     def _show_context_menu(self, pos):
         """右键菜单"""

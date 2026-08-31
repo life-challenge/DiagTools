@@ -689,12 +689,19 @@ class MainWindow(QMainWindow):
                 bitrate = 0
                 addr_tx = can_iface.ecu_address
                 addr_rx = can_iface.tester_address
+                # DoIP会话上下文: pcap导出时重建以太网帧用
+                self._log_dock.can_trace.set_doip_context(
+                    can_iface.tester_address, can_iface.ecu_address)
+                self._trace_view.can_trace.set_doip_context(
+                    can_iface.tester_address, can_iface.ecu_address)
             else:
                 self._uds_client = UdsClient(can_iface, tx_id=tx_id, rx_id=rx_id)
                 bus_text = (f"{self._connection_panel.channel} | "
                             f"{self._connection_panel.bitrate // 1000}k")
                 bitrate = self._connection_panel.bitrate
                 addr_tx, addr_rx = tx_id, rx_id
+                self._log_dock.can_trace.clear_doip_context()
+                self._trace_view.can_trace.clear_doip_context()
 
             # 注入UDS客户端到所有工作区
             self._diag_view.set_uds_client(self._uds_client)
@@ -739,6 +746,8 @@ class MainWindow(QMainWindow):
             self._trace_view.set_uds_client(None)
             self._trace_view.set_can_interface(None)
             self._diag_view.set_online(False)
+            self._log_dock.can_trace.clear_doip_context()
+            self._trace_view.can_trace.clear_doip_context()
 
             self._set_dot(self._lbl_can, "CAN", False)
             self._set_dot(self._lbl_uds, "UDS", False)
