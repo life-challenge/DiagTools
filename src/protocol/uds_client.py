@@ -16,11 +16,26 @@ class UdsClient:
     封装UDS服务调用，处理超时、NRC解析、TesterPresent保活。
     """
 
-    def __init__(self, can_interface: CanInterfaceBase,
+    def __init__(self, can_interface: Optional[CanInterfaceBase] = None,
                  tx_id: int = 0x7E0, rx_id: int = 0x7E8,
-                 p2_timeout: float = 0.5, p2_star_timeout: float = 5.0):
+                 p2_timeout: float = 0.5, p2_star_timeout: float = 5.0,
+                 transport_layer=None):
+        """初始化UDS客户端
+
+        Args:
+            can_interface: CAN接口实例（CAN传输时必传，DoIP时可传None）
+            tx_id: 发送CAN ID（仅CAN传输）
+            rx_id: 接收CAN ID（仅CAN传输）
+            p2_timeout: P2超时（秒）
+            p2_star_timeout: P2*超时（秒）
+            transport_layer: 可选，注入自定义传输层（如DoipTransportLayer），
+                与CAN TransportLayer保持send_tp/receive_tp同构接口
+        """
         self._can = can_interface
-        self._tp = TransportLayer(can_interface, tx_id, rx_id)
+        if transport_layer is not None:
+            self._tp = transport_layer
+        else:
+            self._tp = TransportLayer(can_interface, tx_id, rx_id)
         self._p2_timeout = p2_timeout
         self._p2_star_timeout = p2_star_timeout
         self._tester_present_timer: Optional[threading.Timer] = None
@@ -30,6 +45,7 @@ class UdsClient:
 
     @property
     def transport_layer(self) -> TransportLayer:
+        """底层传输层（CAN TransportLayer或DoipTransportLayer）"""
         return self._tp
 
     @property
@@ -212,12 +228,19 @@ class UdsClient:
         self._tester_present_timer.start()
 
     def _send_tester_present(self, interval_ms: int):
-        if self._tester_present_running and self._can.is_connected:
+        if self._tester_present_running and self._is_transport_connected():
             try:
                 self.tester_present(suppress_response=True)
             except Exception:
                 pass
             self._schedule_tester_present(interval_ms)
+
+    def _is_transport_connected(self) -> bool:
+        """检查底层传输是否可用（兼容CAN接口与DoIP传输层）"""
+        # DoIP等注入传输层提供is_connected属性
+        if hasattr(self._tp, "is_connected"):
+            return self._tp.is_connected
+        return bool(self._can and self._can.is_connected)
 
     # --- 日志辅助 ---
 

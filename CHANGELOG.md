@@ -3,6 +3,22 @@
 本文件记录 DiagTools 各版本的重要变更，格式遵循
 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)。
 
+## [1.2.0] - 2026-08-31
+
+### 新增
+- DoIP 诊断支持（ISO 13400-2）：TCP 路由激活 + 诊断消息收发，
+  UDS 客户端可无缝切换 CAN/以太网传输
+- 连接面板新增 DoIP 接口类型（IP/端口/Tester 与 ECU 逻辑地址），
+  支持 UDP 广播「发现ECU」自动填入地址
+- 虚拟 DoIP ECU（回环模拟，复用 VirtualEcuSimulator），
+  无硬件即可体验完整 DoIP 诊断链路
+- 日志路径显眼化：日志面板头部路径标签（跟随页签）点击打开对应目录、
+  打开日志文件夹按钮、状态栏 Logging 块可点击
+- DoIP 单元测试 11 项（回环，无硬件依赖）
+
+### 变更
+- `UdsClient` 支持注入自定义传输层（`transport_layer` 参数）
+
 ## [1.1.0] - 2026-08-31
 
 ### 新增

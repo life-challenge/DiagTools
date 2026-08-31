@@ -680,7 +680,21 @@ class MainWindow(QMainWindow):
             can_iface = self._connection_panel.can_interface
             tx_id = self._connection_panel.tx_id
             rx_id = self._connection_panel.rx_id
-            self._uds_client = UdsClient(can_iface, tx_id=tx_id, rx_id=rx_id)
+
+            if self._connection_panel.is_doip:
+                # DoIP: 注入DoIP传输层，用逻辑地址替代CAN ID展示
+                self._uds_client = UdsClient(transport_layer=can_iface)
+                bus_text = (f"{self._connection_panel.doip_ip}:"
+                            f"{self._connection_panel.doip_port}")
+                bitrate = 0
+                addr_tx = can_iface.ecu_address
+                addr_rx = can_iface.tester_address
+            else:
+                self._uds_client = UdsClient(can_iface, tx_id=tx_id, rx_id=rx_id)
+                bus_text = (f"{self._connection_panel.channel} | "
+                            f"{self._connection_panel.bitrate // 1000}k")
+                bitrate = self._connection_panel.bitrate
+                addr_tx, addr_rx = tx_id, rx_id
 
             # 注入UDS客户端到所有工作区
             self._diag_view.set_uds_client(self._uds_client)
@@ -697,7 +711,7 @@ class MainWindow(QMainWindow):
             self._diag_view.set_online(True)
             self._diag_view.set_connection_info(
                 can_iface.interface_name, can_iface.channel_info,
-                self._connection_panel.bitrate, tx_id, rx_id)
+                bitrate, addr_tx, addr_rx)
             self._diag_view.update_live(session_text="默认",
                                         ecu_name=(self._current_ecu.name
                                                   if self._current_ecu else None))
@@ -706,16 +720,12 @@ class MainWindow(QMainWindow):
             self._set_dot(self._lbl_can, "CAN", True)
             self._set_dot(self._lbl_uds, "UDS", True)
             self._lbl_vci.setText(f"VCI: {can_iface.interface_name}")
-            self._lbl_bus.setText(
-                f"{self._connection_panel.channel} | "
-                f"{self._connection_panel.bitrate // 1000}k")
+            self._lbl_bus.setText(bus_text)
             ecu_name = self._current_ecu.name if self._current_ecu else "--"
             self._lbl_ecu.setText(f"ECU: {ecu_name} | Online")
             self._lbl_session.setText("Session: 默认")
             self._log_dock.log_business(
-                f"已连接 {can_iface.interface_name} | "
-                f"{self._connection_panel.channel} | "
-                f"{self._connection_panel.bitrate // 1000}k")
+                f"已连接 {can_iface.interface_name} | {bus_text}")
             self._refresh_overview_info()
         else:
             can_iface = self._connection_panel.can_interface

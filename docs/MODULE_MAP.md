@@ -47,8 +47,9 @@ d:\DiagTools
 | 文件 | 职责 |
 |---|---|
 | transport_layer.py | ISO 15765-2 分片/重组/流控 |
+| doip_layer.py | ISO 13400-2 DoIP传输层（路由激活/诊断消息/UDP发现）+ 虚拟DoIP ECU |
 | uds_services.py | ISO 14229 全服务编解码 + NRC 描述 |
-| uds_client.py | 请求/响应匹配、超时、TesterPresent、异步回调 |
+| uds_client.py | 请求/响应匹配、超时、TesterPresent、异步回调，支持传输层注入(CAN/DoIP) |
 
 ### business
 | 文件 | 职责 |

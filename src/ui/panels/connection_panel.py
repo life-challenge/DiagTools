@@ -8,8 +8,8 @@ from src.can_layer.can_factory import CanFactory
 from src.utils.config_manager import get_config_manager
 
 # 接口类型: 配置字符串 <-> 下拉框索引
-_TYPE_TO_INDEX = {"virtual": 0, "pcan": 1, "vector": 2}
-_INDEX_TO_TYPE = {0: "virtual", 1: "pcan", 2: "vector"}
+_TYPE_TO_INDEX = {"virtual": 0, "pcan": 1, "vector": 2, "doip": 3}
+_INDEX_TO_TYPE = {0: "virtual", 1: "pcan", 2: "vector", 3: "doip"}
 
 
 class ConnectionPanel(QWidget):
@@ -31,7 +31,8 @@ class ConnectionPanel(QWidget):
         form = QFormLayout()
 
         self._interface_type = QComboBox()
-        self._interface_type.addItems(["Virtual (虚拟CAN)", "PCAN", "Vector"])
+        self._interface_type.addItems(
+            ["Virtual (虚拟CAN)", "PCAN", "Vector", "DoIP (Ethernet)"])
         self._interface_type.currentIndexChanged.connect(self._on_type_changed)
         form.addRow("接口类型:", self._interface_type)
 
@@ -52,14 +53,56 @@ class ConnectionPanel(QWidget):
         channel_widget = QWidget()
         channel_widget.setLayout(channel_row)
         form.addRow("通道:", channel_widget)
+        self._channel_label = form.labelForField(channel_widget)
 
         self._bitrate_combo = QComboBox()
         self._bitrate_combo.addItems(["500000", "250000", "125000", "1000000"])
         self._bitrate_combo.setEditable(True)
         form.addRow("波特率:", self._bitrate_combo)
+        self._bitrate_label = form.labelForField(self._bitrate_combo)
 
         config_group.setLayout(form)
         layout.addWidget(config_group)
+
+        # DoIP配置组（仅接口类型为DoIP时显示）
+        doip_group = QGroupBox("DoIP配置")
+        doip_form = QFormLayout()
+
+        ip_row = QHBoxLayout()
+        self._doip_ip = QLineEdit("127.0.0.1")
+        self._doip_ip.setMinimumWidth(120)
+        ip_row.addWidget(self._doip_ip, 1)
+        self._doip_scan_btn = QPushButton("发现ECU")
+        self._doip_scan_btn.setToolTip("UDP广播搜索局域网内的DoIP节点")
+        self._doip_scan_btn.clicked.connect(self._on_doip_discover)
+        ip_row.addWidget(self._doip_scan_btn)
+        ip_widget = QWidget()
+        ip_widget.setLayout(ip_row)
+        doip_form.addRow("ECU IP地址:", ip_widget)
+
+        self._doip_port = QSpinBox()
+        self._doip_port.setRange(1, 65535)
+        self._doip_port.setValue(13400)
+        doip_form.addRow("TCP端口:", self._doip_port)
+
+        self._doip_tester_addr = QSpinBox()
+        self._doip_tester_addr.setRange(0, 0xFFFF)
+        self._doip_tester_addr.setDisplayIntegerBase(16)
+        self._doip_tester_addr.setPrefix("0x")
+        self._doip_tester_addr.setValue(0x0E80)
+        doip_form.addRow("Tester逻辑地址:", self._doip_tester_addr)
+
+        self._doip_ecu_addr = QSpinBox()
+        self._doip_ecu_addr.setRange(0, 0xFFFF)
+        self._doip_ecu_addr.setDisplayIntegerBase(16)
+        self._doip_ecu_addr.setPrefix("0x")
+        self._doip_ecu_addr.setValue(0x1000)
+        doip_form.addRow("ECU逻辑地址:", self._doip_ecu_addr)
+
+        doip_group.setLayout(doip_form)
+        doip_group.setVisible(False)
+        layout.addWidget(doip_group)
+        self._doip_group = doip_group
 
         # UDS地址配置组
         addr_group = QGroupBox("UDS地址配置")
@@ -81,6 +124,7 @@ class ConnectionPanel(QWidget):
 
         addr_group.setLayout(addr_form)
         layout.addWidget(addr_group)
+        self._addr_group = addr_group
 
         # 连接按钮
         btn_layout = QHBoxLayout()
@@ -145,6 +189,17 @@ class ConnectionPanel(QWidget):
         self._tx_id.setValue(self._parse_id(cfg.get("can.req_id"), 0x7E0))
         self._rx_id.setValue(self._parse_id(cfg.get("can.resp_id"), 0x7E8))
 
+        # 恢复DoIP参数
+        self._doip_ip.setText(str(cfg.get("doip.ip", "127.0.0.1")))
+        try:
+            self._doip_port.setValue(int(cfg.get("doip.port", 13400)))
+        except (ValueError, TypeError):
+            pass
+        self._doip_tester_addr.setValue(
+            self._parse_id(cfg.get("doip.tester_addr"), 0x0E80))
+        self._doip_ecu_addr.setValue(
+            self._parse_id(cfg.get("doip.ecu_addr"), 0x1000))
+
     def save_to_config(self):
         """将当前连接参数写入配置并持久化到磁盘"""
         try:
@@ -161,14 +216,20 @@ class ConnectionPanel(QWidget):
                 pass
             cfg.set("can.req_id", self._tx_id.value())
             cfg.set("can.resp_id", self._rx_id.value())
+            cfg.set("doip.ip", self._doip_ip.text().strip() or "127.0.0.1")
+            cfg.set("doip.port", self._doip_port.value())
+            cfg.set("doip.tester_addr", self._doip_tester_addr.value())
+            cfg.set("doip.ecu_addr", self._doip_ecu_addr.value())
             cfg.save_config()
         except Exception:
             pass
 
     def _on_type_changed(self, index):
         """接口类型切换时更新默认通道和扫描按钮"""
+        is_doip = (index == 3)
+
         # 通道默认值
-        defaults = ["Virtual_0", "PCAN_USBBUS1", "0"]
+        defaults = ["Virtual_0", "PCAN_USBBUS1", "0", ""]
         default = defaults[index] if index < len(defaults) else "Virtual_0"
 
         # 填充下拉框选项
@@ -182,14 +243,51 @@ class ConnectionPanel(QWidget):
             self._channel_combo.addItems(["0", "1", "2", "3"])
 
         # 设置当前值
-        idx = self._channel_combo.findText(default)
-        if idx >= 0:
-            self._channel_combo.setCurrentIndex(idx)
-        else:
-            self._channel_combo.setCurrentText(default)
+        if not is_doip:
+            idx = self._channel_combo.findText(default)
+            if idx >= 0:
+                self._channel_combo.setCurrentIndex(idx)
+            else:
+                self._channel_combo.setCurrentText(default)
 
         # 扫描按钮仅对真实硬件显示
-        self._scan_btn.setVisible(index > 0)
+        self._scan_btn.setVisible(index in (1, 2))
+
+        # DoIP时隐藏CAN专属配置（通道/波特率/CAN地址），显示DoIP配置组
+        self._channel_label.setVisible(not is_doip)
+        self._channel_combo.parentWidget().setVisible(not is_doip)
+        self._bitrate_label.setVisible(not is_doip)
+        self._bitrate_combo.setVisible(not is_doip)
+        self._addr_group.setVisible(not is_doip)
+        self._doip_group.setVisible(is_doip)
+
+    def _on_doip_discover(self):
+        """UDP广播发现局域网内的DoIP节点"""
+        from src.protocol.doip_layer import DoipTransportLayer
+        self._doip_scan_btn.setEnabled(False)
+        self._doip_scan_btn.setText("...")
+        try:
+            nodes = DoipTransportLayer.discover(timeout=1.0)
+            if nodes:
+                node = nodes[0]
+                self._doip_ip.setText(node["ip"])
+                if node["logical_addr"]:
+                    self._doip_ecu_addr.setValue(node["logical_addr"])
+                self._status_label.setText(
+                    f"状态: 发现 {len(nodes)} 个DoIP节点，"
+                    f"已填入 {node['ip']} (0x{node['logical_addr']:04X})")
+            else:
+                self._status_label.setText("状态: 未发现DoIP节点")
+                QMessageBox.information(
+                    self, "发现结果",
+                    "未发现DoIP节点。\n请检查:\n"
+                    "1. ECU与本机是否在同一网段\n"
+                    "2. UDP 13400端口是否被防火墙拦截")
+        except Exception as e:
+            QMessageBox.warning(self, "发现失败", f"DoIP节点发现异常:\n{e}")
+        finally:
+            self._doip_scan_btn.setEnabled(True)
+            self._doip_scan_btn.setText("发现ECU")
 
     def _on_scan_channels(self):
         """扫描可用通道"""
@@ -242,23 +340,37 @@ class ConnectionPanel(QWidget):
 
     def _on_connect(self):
         try:
-            type_map = {0: "virtual", 1: "pcan", 2: "vector"}
+            type_map = {0: "virtual", 1: "pcan", 2: "vector", 3: "doip"}
             iface_type = type_map.get(self._interface_type.currentIndex(), "virtual")
 
-            # 获取通道值：下拉框有userData则用userData，否则用文本
-            channel = self._channel_combo.currentData()
-            if channel is None:
-                channel = self._channel_combo.currentText().strip()
+            if iface_type == "doip":
+                # DoIP: 建立TCP连接并完成路由激活
+                from src.protocol.doip_layer import DoipTransportLayer
+                self._can_interface = DoipTransportLayer(
+                    target_ip=self._doip_ip.text().strip() or "127.0.0.1",
+                    tcp_port=self._doip_port.value(),
+                    tester_address=self._doip_tester_addr.value(),
+                    ecu_address=self._doip_ecu_addr.value(),
+                    timeout=3.0)
+                ok = self._can_interface.connect()
+                error_detail = self._can_interface.last_error
+            else:
+                # 获取通道值：下拉框有userData则用userData，否则用文本
+                channel = self._channel_combo.currentData()
+                if channel is None:
+                    channel = self._channel_combo.currentText().strip()
 
-            config = {
-                "channel": channel,
-                "bitrate": int(self._bitrate_combo.currentText()),
-                "req_id": self._tx_id.value(),
-                "resp_id": self._rx_id.value(),
-            }
+                config = {
+                    "channel": channel,
+                    "bitrate": int(self._bitrate_combo.currentText()),
+                    "req_id": self._tx_id.value(),
+                    "resp_id": self._rx_id.value(),
+                }
+                self._can_interface = CanFactory.create(iface_type)
+                ok = self._can_interface.connect(config)
+                error_detail = getattr(self._can_interface, 'last_error', None)
 
-            self._can_interface = CanFactory.create(iface_type)
-            if self._can_interface.connect(config):
+            if ok:
                 self._connected = True
                 self._connect_btn.setEnabled(False)
                 self._disconnect_btn.setEnabled(True)
@@ -270,11 +382,9 @@ class ConnectionPanel(QWidget):
                 self.save_to_config()
             else:
                 # 获取详细错误信息
-                error_msg = "无法建立CAN连接"
-                if hasattr(self._can_interface, 'last_error'):
-                    detail = self._can_interface.last_error
-                    if detail:
-                        error_msg = f"连接失败:\n{detail}"
+                error_msg = "无法建立连接"
+                if error_detail:
+                    error_msg = f"连接失败:\n{error_detail}"
                 QMessageBox.warning(self, "连接失败", error_msg)
 
         except Exception as e:
@@ -325,3 +435,16 @@ class ConnectionPanel(QWidget):
             return int(self._bitrate_combo.currentText())
         except ValueError:
             return 500000
+
+    @property
+    def is_doip(self) -> bool:
+        """当前接口类型是否为DoIP"""
+        return self._interface_type.currentIndex() == 3
+
+    @property
+    def doip_ip(self) -> str:
+        return self._doip_ip.text().strip() or "127.0.0.1"
+
+    @property
+    def doip_port(self) -> int:
+        return self._doip_port.value()
