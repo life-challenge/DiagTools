@@ -475,7 +475,7 @@ class MainWindow(QMainWindow):
         self._add_action(cfg_menu, "Security配置", self._on_security_config)
         log_menu = tools_menu.addMenu("日志工具")
         self._add_action(log_menu, "查看日志", self._on_view_log)
-        self._add_action(log_menu, "打开日志目录", self._on_open_log_dir)
+        self._add_action(log_menu, "打开日志文件夹", self._on_open_log_dir)
         self._add_action(log_menu, "导出日志", self._on_export_log)
         tools_menu.addSeparator()
         self._add_action(tools_menu, "选项设置", self._on_settings)
@@ -552,6 +552,12 @@ class MainWindow(QMainWindow):
         self._lbl_security = self._sb_block("Security: Locked")
         self._lbl_power = self._sb_block("Power: --")
         self._lbl_logging = self._sb_block("Logging ●")
+        # Logging块可点击: 打开日志根目录（显眼入口）
+        self._lbl_logging.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._lbl_logging.setToolTip(
+            "点击打开日志文件夹（logs/：app/diag/comm/flash/sequence）")
+        self._lbl_logging.mousePressEvent = \
+            lambda _e: self._on_open_log_dir()
 
         self._lbl_counter = self._sb_block("TX:0 RX:0", permanent=True)
         self._lbl_time = self._sb_block("", permanent=True)
@@ -1299,13 +1305,17 @@ class MainWindow(QMainWindow):
             "并连同诊断项目文件与复现步骤一并反馈给工具维护者。")
 
     def _on_open_log_dir(self):
-        """工具-日志工具: 在资源管理器中打开日志目录"""
-        log_dir = os.path.join(
-            os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))),
-            "logs"
-        )
-        if os.path.exists(log_dir):
+        """工具-日志工具: 在资源管理器中打开日志根目录"""
+        from src.log.log_manager import get_log_manager
+        log_dir = get_log_manager().log_base_dir
+        os.makedirs(log_dir, exist_ok=True)
+        if os.name == "nt":
             subprocess.Popen(f'explorer "{log_dir}"')
+        elif sys.platform == "darwin":
+            subprocess.Popen(["open", log_dir])
+        else:
+            subprocess.Popen(["xdg-open", log_dir])
+        self._statusbar.showMessage(f"已打开日志文件夹: {log_dir}", 3000)
 
     def _on_about(self):
         QMessageBox.about(

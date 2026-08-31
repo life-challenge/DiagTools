@@ -5,16 +5,26 @@
   UDS Trace - 仅记录可解析为UDS服务的报文
   CAN Trace - 全部CAN报文
 
-支持: 折叠/展开、清空、导出、拖拽调整高度（由主窗口splitter提供）。
+支持: 折叠/展开、清空、导出、打开日志文件夹、拖拽调整高度
+（由主窗口splitter提供）。日志落盘路径见头部路径标签，单击复制、双击打开。
 """
 
+import os
+import sys
 import time
+import subprocess
 from PyQt6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QPushButton, QLabel,
     QTabWidget, QPlainTextEdit, QFileDialog
 )
+from PyQt6.QtCore import Qt
 from PyQt6.QtGui import QColor, QTextCharFormat, QTextCursor
 from src.ui.widgets.log_widget import LogWidget
+from src.log.log_manager import get_log_manager
+
+
+# 页签 -> 日志子目录映射（0业务/1 UDS/2 CAN）
+_TAB_SUBDIRS = {0: "app", 1: "diag", 2: "comm"}
 
 
 class LogDock(QWidget):
@@ -59,6 +69,17 @@ class LogDock(QWidget):
         self._count_label.setStyleSheet("color: #888;")
         header.addWidget(self._count_label)
 
+        # ---- 日志落盘路径标签（显眼提示，双击打开文件夹） ----
+        self._path_label = QLabel()
+        self._path_label.setStyleSheet(
+            "color: #4FC3F7; text-decoration: underline;")
+        self._path_label.setToolTip(
+            "点击打开日志文件夹（路径已展示，可手动复制）\n"
+            "日志按模块分类: app/diag/comm/flash/sequence")
+        self._path_label.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._path_label.mousePressEvent = lambda _e: self._open_log_folder()
+        header.addWidget(self._path_label, 1)
+
         header.addStretch()
 
         clear_btn = QPushButton("清空")
@@ -70,6 +91,11 @@ class LogDock(QWidget):
         export_btn.setFixedWidth(50)
         export_btn.clicked.connect(self._export_active)
         header.addWidget(export_btn)
+
+        folder_btn = QPushButton("📁 打开日志文件夹")
+        folder_btn.setToolTip("在资源管理器中打开当前页签对应的日志目录")
+        folder_btn.clicked.connect(self._open_log_folder)
+        header.addWidget(folder_btn)
 
         layout.addWidget(header_widget)
 
@@ -91,6 +117,10 @@ class LogDock(QWidget):
 
         # CAN Trace新条目 -> 更新事件计数（GUI线程）
         self._can_trace.message_received.connect(self._update_count)
+
+        # 页签切换 -> 路径标签跟随（初始也刷新一次）
+        self._tabs.currentChanged.connect(lambda _i: self._refresh_log_path())
+        self._refresh_log_path()
 
     # ---------------- 对外接口 ----------------
 
@@ -150,6 +180,28 @@ class LogDock(QWidget):
         return self._collapsed
 
     # ---------------- 内部 ----------------
+
+    def _current_log_dir(self) -> str:
+        """当前页签对应的日志子目录路径"""
+        subdir = _TAB_SUBDIRS.get(self._tabs.currentIndex(), "app")
+        return os.path.join(get_log_manager().log_base_dir, subdir)
+
+    def _refresh_log_path(self):
+        """刷新头部路径标签（跟随当前页签）"""
+        self._path_label.setText(
+            "📄 " + self._current_log_dir().replace("/", "\\"))
+
+    def _open_log_folder(self):
+        """在资源管理器中打开当前页签对应的日志目录"""
+        path = self._current_log_dir()
+        if not os.path.isdir(path):
+            os.makedirs(path, exist_ok=True)
+        if os.name == "nt":
+            subprocess.Popen(f'explorer "{path}"')
+        elif sys.platform == "darwin":
+            subprocess.Popen(["open", path])
+        else:
+            subprocess.Popen(["xdg-open", path])
 
     def _update_count(self, _entry=None):
         total = self._can_trace.tx_count + self._can_trace.rx_count
