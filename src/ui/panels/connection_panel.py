@@ -1,8 +1,8 @@
-"""CAN连接配置面板"""
+"""通信连接配置面板（CAN / DoIP）"""
 
 from PyQt6.QtWidgets import (QWidget, QVBoxLayout, QHBoxLayout, QGroupBox,
                               QLabel, QComboBox, QLineEdit, QPushButton,
-                              QFormLayout, QSpinBox, QMessageBox)
+                              QFormLayout, QSpinBox, QMessageBox, QCheckBox)
 from PyQt6.QtCore import pyqtSignal, Qt
 from src.can_layer.can_factory import CanFactory
 from src.utils.config_manager import get_config_manager
@@ -13,7 +13,7 @@ _INDEX_TO_TYPE = {0: "virtual", 1: "pcan", 2: "vector", 3: "doip"}
 
 
 class ConnectionPanel(QWidget):
-    """CAN连接配置面板"""
+    """通信连接配置面板（CAN/DoIP接口选择、地址配置与连接控制）"""
 
     connection_changed = pyqtSignal(bool)  # 连接状态变化信号
 
@@ -21,13 +21,14 @@ class ConnectionPanel(QWidget):
         super().__init__(parent)
         self._can_interface = None
         self._connected = False
+        self._virtual_doip_ecu = None  # 本地虚拟DoIP ECU（勾选回环时启动）
         self._init_ui()
 
     def _init_ui(self):
         layout = QVBoxLayout(self)
 
         # 接口配置组
-        config_group = QGroupBox("CAN接口配置")
+        config_group = QGroupBox("通信接口配置")
         form = QFormLayout()
 
         self._interface_type = QComboBox()
@@ -98,6 +99,13 @@ class ConnectionPanel(QWidget):
         self._doip_ecu_addr.setPrefix("0x")
         self._doip_ecu_addr.setValue(0x1000)
         doip_form.addRow("ECU逻辑地址:", self._doip_ecu_addr)
+
+        # 本地虚拟ECU回环（无真实ECU时的本机测试入口）
+        self._doip_virtual_check = QCheckBox("本地虚拟ECU（回环模拟）")
+        self._doip_virtual_check.setToolTip(
+            "连接时在本机TCP端口启动虚拟DoIP ECU（复用CAN虚拟ECU模拟器），\n"
+            "无需真实ECU即可测试完整DoIP诊断链路；断开时自动停止")
+        doip_form.addRow("", self._doip_virtual_check)
 
         doip_group.setLayout(doip_form)
         doip_group.setVisible(False)
@@ -346,9 +354,23 @@ class ConnectionPanel(QWidget):
             if iface_type == "doip":
                 # DoIP: 建立TCP连接并完成路由激活
                 from src.protocol.doip_layer import DoipTransportLayer
+                ip = self._doip_ip.text().strip() or "127.0.0.1"
+                port = self._doip_port.value()
+
+                # 勾选本地虚拟ECU时先启动回环模拟器（复用虚拟CAN的ECU仿真）
+                if self._doip_virtual_check.isChecked():
+                    if not self._start_virtual_doip_ecu(port):
+                        return
+                elif ip in ("127.0.0.1", "localhost"):
+                    # 本机无监听时的友好提示
+                    QMessageBox.information(
+                        self, "提示",
+                        "本机 "+ ip + ":" + str(port) + " 无DoIP服务。\n\n"
+                        "如需无硬件测试，请勾选\"本地虚拟ECU（回环模拟）\"。")
+                    return
+
                 self._can_interface = DoipTransportLayer(
-                    target_ip=self._doip_ip.text().strip() or "127.0.0.1",
-                    tcp_port=self._doip_port.value(),
+                    target_ip=ip, tcp_port=port,
                     tester_address=self._doip_tester_addr.value(),
                     ecu_address=self._doip_ecu_addr.value(),
                     timeout=3.0)
@@ -382,17 +404,43 @@ class ConnectionPanel(QWidget):
                 self.save_to_config()
             else:
                 # 获取详细错误信息
+                self._stop_virtual_doip_ecu()
                 error_msg = "无法建立连接"
                 if error_detail:
                     error_msg = f"连接失败:\n{error_detail}"
                 QMessageBox.warning(self, "连接失败", error_msg)
 
         except Exception as e:
+            self._stop_virtual_doip_ecu()
             QMessageBox.critical(self, "连接错误", f"连接失败:\n{e}")
+
+    def _start_virtual_doip_ecu(self, port: int) -> bool:
+        """启动本地虚拟DoIP ECU（回环模拟）"""
+        from src.protocol.doip_layer import VirtualDoipEcu
+        self._stop_virtual_doip_ecu()
+        ecu = VirtualDoipEcu(
+            logical_address=self._doip_ecu_addr.value(), host="127.0.0.1")
+        try:
+            ecu.start(tcp_port=port)
+        except OSError as e:
+            QMessageBox.warning(
+                self, "虚拟ECU启动失败",
+                f"无法在本机端口 {port} 启动虚拟DoIP ECU:\n{e}\n\n"
+                "端口可能已被占用，请更换TCP端口。")
+            return False
+        self._virtual_doip_ecu = ecu
+        return True
+
+    def _stop_virtual_doip_ecu(self):
+        """停止本地虚拟DoIP ECU（断开时自动回收）"""
+        if self._virtual_doip_ecu is not None:
+            self._virtual_doip_ecu.stop()
+            self._virtual_doip_ecu = None
 
     def _on_disconnect(self):
         if self._can_interface:
             self._can_interface.disconnect()
+        self._stop_virtual_doip_ecu()
         self._connected = False
         self._connect_btn.setEnabled(True)
         self._disconnect_btn.setEnabled(False)

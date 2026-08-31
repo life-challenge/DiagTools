@@ -1,6 +1,6 @@
 """工具中心视图（V2 §3）
 
-VCI/CAN通信配置等系统级工具。CAN接口细节不占据主视觉（§4原则4），
+VCI/通信接口配置等系统级工具。接口细节不占据主视觉（§4原则4），
 集中放置于此，通过工具栏"连接/断开"按钮快捷操作。
 """
 
@@ -23,9 +23,10 @@ class ToolsView(QWidget):
         layout.addWidget(connection_panel)
 
         hint = QLabel(
-            "VCI / CAN 通信配置\n\n"
-            "· 选择接口类型与通道后点击\"连接\"，或使用工具栏 连接(F5)/断开(F6)\n"
+            "VCI / 通信配置\n\n"
+            "· 选择接口类型（Virtual/PCAN/Vector/DoIP）后点击\"连接\"，或使用工具栏 连接(F5)/断开(F6)\n"
             "· 连接参数在连接成功与退出时自动保存，下次启动自动恢复\n"
+            "· DoIP无真实ECU时可勾选\"本地虚拟ECU（回环模拟）\"在本机测试\n"
             "· 安全算法32位桥接所需的Python路径在 ECU诊断→高级诊断→安全访问 中配置")
         hint.setAlignment(Qt.AlignmentFlag.AlignTop | Qt.AlignmentFlag.AlignLeft)
         hint.setStyleSheet("color: #888; padding: 12px;")

@@ -478,8 +478,12 @@ class VirtualDoipEcu:
         """底层UDS模拟器（用于外部配置DID/DTC等）"""
         return self._ecu
 
-    def start(self) -> tuple:
+    def start(self, tcp_port: int = 0) -> tuple:
         """启动模拟ECU（TCP诊断 + UDP车辆发现）
+
+        Args:
+            tcp_port: TCP监听端口（0=随机分配；指定端口便于本机测试，
+                如13400）
 
         Returns:
             (host, tcp_port) 监听地址
@@ -488,7 +492,7 @@ class VirtualDoipEcu:
             return self._host, self._port
         self._server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         self._server.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-        self._server.bind((self._host, 0))
+        self._server.bind((self._host, tcp_port or 0))
         self._server.listen(1)
         self._server.settimeout(0.2)
         self._port = self._server.getsockname()[1]
