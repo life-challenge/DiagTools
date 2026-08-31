@@ -1,12 +1,14 @@
 """DoIP传输层单元测试（回环，无需硬件）
 
 覆盖: 帧构造/解析、路由激活、UDS诊断回环（经UdsClient）、
-连接拒绝、超时行为、UDP车辆发现、报文监听器。
+连接拒绝、超时行为、UDP车辆发现、报文监听器、刷写全流程（经FlashManager）。
 """
 
 import os
 import sys
 import struct
+import tempfile
+import time
 import unittest
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..")))
@@ -198,6 +200,91 @@ class TestDoipDiscovery(unittest.TestCase):
             self.assertEqual(nodes[0]["vin"], "VIRTUALDOIP-ECU01")
         finally:
             ecu.stop()
+
+
+class TestDoipFlash(unittest.TestCase):
+    """DoIP链路刷写全流程测试（FlashManager + 虚拟DoIP ECU）
+
+    验证刷写步骤序列（含功能寻址的刷前准备/刷后恢复）在DoIP传输上完整可用。
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        cls.ecu = VirtualDoipEcu(logical_address=0x1000)
+        cls.host, cls.port = cls.ecu.start()
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.ecu.stop()
+
+    def _wait_done(self, manager, timeout=15.0) -> bool:
+        """等待刷写流程结束（成功/失败/取消均算结束）"""
+        deadline = time.time() + timeout
+        while time.time() < deadline:
+            if not manager.is_running and manager.state != 0:  # 非IDLE即已结束
+                return True
+            time.sleep(0.05)
+        return False
+
+    def test_full_flash_over_doip(self):
+        """完整刷写流程: 刷前准备(功能寻址)→编程→传输→刷后恢复"""
+        from src.business.flash_manager import (
+            FlashManager, FlashConfig, FlashState,
+        )
+
+        # 准备小体积固件文件（64字节）
+        fw_data = bytes(range(64))
+        with tempfile.NamedTemporaryFile(suffix=".bin", delete=False) as f:
+            f.write(fw_data)
+            fw_path = f.name
+
+        layer = DoipTransportLayer(
+            target_ip=self.host, tcp_port=self.port,
+            tester_address=0x0E80, ecu_address=0x1000, timeout=2.0)
+        self.assertTrue(layer.connect(), layer.last_error)
+        try:
+            client = UdsClient(transport_layer=layer, p2_timeout=2.0)
+            manager = FlashManager(client)
+
+            config = FlashConfig()
+            config.file_path = fw_path
+            config.block_size = 16          # 4块，验证分块传输
+            config.security_level = 0       # 跳过安全访问（无密钥算法）
+            config.write_fingerprint = False
+            config.driver_path = ""         # 无驱动下载
+
+            manager.start_flash(config)
+            self.assertTrue(self._wait_done(manager), "刷写流程超时")
+
+            self.assertEqual(
+                manager.state, FlashState.COMPLETED,
+                f"刷写失败: {manager.progress.error_message}")
+            self.assertEqual(manager.progress.transferred_bytes, 64)
+            self.assertEqual(manager.progress.total_blocks, 4)
+        finally:
+            layer.disconnect()
+            os.unlink(fw_path)
+
+    def test_functional_address_mapping(self):
+        """功能寻址地址映射: CAN 0x7DF -> DoIP功能组 0xE400，且可恢复"""
+        layer = DoipTransportLayer(
+            target_ip=self.host, tcp_port=self.port,
+            tester_address=0x0E80, ecu_address=0x1000, timeout=2.0)
+        self.assertTrue(layer.connect(), layer.last_error)
+        try:
+            self.assertEqual(layer.tx_id, 0x1000)
+            layer.tx_id = 0x7DF          # CAN功能地址
+            self.assertEqual(layer.tx_id, 0xE400)  # 自动映射
+            layer.tx_id = 0x1000         # 恢复物理寻址
+            self.assertEqual(layer.tx_id, 0x1000)
+            # 功能组地址下发送仍可收到响应（虚拟ECU回送到Tester地址）
+            layer.tx_id = 0x7DF
+            resp = layer.send_tp(b"\x10\x03") and layer.receive_tp(timeout=2.0)
+            self.assertIsNotNone(resp)
+            self.assertEqual(resp[0], 0x50)
+            layer.tx_id = 0x1000
+        finally:
+            layer.disconnect()
 
 
 if __name__ == "__main__":

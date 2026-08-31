@@ -64,6 +64,7 @@ class VirtualEcuSimulator:
             0x19: self._handle_read_dtc,
             0x22: self._handle_read_did,
             0x27: self._handle_security_access,
+            0x28: self._handle_communication_control,
             0x2E: self._handle_write_did,
             0x2F: self._handle_io_control,
             0x31: self._handle_routine_control,
@@ -177,6 +178,11 @@ class VirtualEcuSimulator:
                     return bytes([0x7F, 0x27, 0x35])  # invalidKey
             return bytes([0x7F, 0x27, 0x35])
 
+    def _handle_communication_control(self, data: bytes) -> bytes:
+        """通信控制 (0x28): 刷写刷前禁止/刷后恢复非诊断报文收发"""
+        sub_func = data[1] if len(data) > 1 else 0x01
+        return bytes([0x68, sub_func])
+
     def _handle_write_did(self, data: bytes) -> bytes:
         if len(data) < 3:
             return bytes([0x7F, 0x2E, 0x13])
@@ -201,7 +207,9 @@ class VirtualEcuSimulator:
         return bytes([0x7F, 0x31, 0x13])
 
     def _handle_request_download(self, data: bytes) -> bytes:
-        return bytes([0x74, 0x20])  # lengthFormatIdentifier + maxNumberOfBlockLength
+        # lengthFormatIdentifier=0x20（maxBlockLength占2字节），
+        # maxNumberOfBlockLength=0x1000
+        return bytes([0x74, 0x20, 0x10, 0x00])
 
     def _handle_transfer_data(self, data: bytes) -> bytes:
         block_seq = data[1] if len(data) > 1 else 0
@@ -280,8 +288,9 @@ class VirtualCanInterface(CanInterfaceBase):
         self._tx_count += 1
         self._notify_message("TX", msg)
 
-        # 如果是发送到请求地址，模拟ECU响应
-        if msg.can_id == self._req_id and msg.data:
+        # 如果是发送到请求地址或功能寻址地址(0x7DF)，模拟ECU响应
+        # （功能寻址是刷写刷前准备/刷后恢复步骤的发送方式）
+        if msg.can_id in (self._req_id, 0x7DF) and msg.data:
             # 检查是否为流控帧（FC）—— TP层协议帧，不是UDS请求
             frame_type = msg.data[0] & 0xF0
             if frame_type == 0x30:

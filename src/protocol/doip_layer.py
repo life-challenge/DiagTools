@@ -120,6 +120,31 @@ class DoipTransportLayer:
     def last_error(self) -> Optional[str]:
         return self._last_error
 
+    @property
+    def tx_id(self) -> int:
+        """发送目标逻辑地址（兼容TransportLayer.tx_id，供功能寻址临时切换）"""
+        return self._ecu_address
+
+    @tx_id.setter
+    def tx_id(self, value: int):
+        """临时切换发送目标（如刷写功能寻址）
+
+        CAN标准功能地址0x7DF自动映射为DoIP功能组地址0xE400
+        （ISO 13400-2 Table 27），其余值直接作为目标逻辑地址。
+        """
+        if value == 0x7DF:
+            value = 0xE400
+        self._ecu_address = value & 0xFFFF
+
+    @property
+    def rx_id(self) -> int:
+        """响应源逻辑地址（兼容TransportLayer.rx_id）"""
+        return self._tester_address
+
+    @rx_id.setter
+    def rx_id(self, value: int):
+        self._tester_address = value & 0xFFFF
+
     # ---------------- 连接管理 ----------------
 
     def connect(self, config: dict = None) -> bool:
