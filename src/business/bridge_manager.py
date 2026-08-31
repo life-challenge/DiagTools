@@ -18,6 +18,7 @@ import sys
 import threading
 from src.utils.config_manager import get_config_manager
 from src.log.log_manager import get_log_manager
+from src.utils.paths import get_bridge_worker_path
 
 _PY32_CONFIG_KEY = "security.python32_path"
 _CALL_TIMEOUT = 30.0  # 单次请求超时（秒）
@@ -184,7 +185,7 @@ class BridgeManager:
                 f"然后在安全面板的\"32位Python\"栏指定其 python.exe 路径；\n"
                 f"或向算法提供方索取64位版本的DLL。")
 
-        script = os.path.join(os.path.dirname(os.path.abspath(__file__)), "bridge_worker.py")
+        script = get_bridge_worker_path()
         flags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
         try:
             self._proc = subprocess.Popen(

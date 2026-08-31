@@ -22,6 +22,7 @@ from src.ui.styles import get_theme, COLORS
 from src.ui.widgets.log_widget import LogWidget
 from src.ui.widgets.log_dock import LogDock
 from src.utils.config_manager import get_config_manager
+from src.utils.paths import get_project_root
 from src.config.ecu_definition import EcuDefinition, load_ecu_definitions
 from src.ui.panels.connection_panel import ConnectionPanel
 from src.ui.panels.flash_panel import FlashPanel
@@ -871,7 +872,11 @@ class MainWindow(QMainWindow):
     # ---------------- 诊断项目（文件菜单, §3） ----------------
 
     def _project_root(self) -> str:
-        return os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        """项目根目录（源码运行=仓库根；打包后=exe所在目录）
+
+        注: 历史实现回溯2层得到的是src目录而非项目根，已修正。
+        """
+        return get_project_root()
 
     def _on_new_project(self):
         """新建诊断项目: 恢复默认连接参数"""

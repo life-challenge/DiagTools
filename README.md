@@ -79,6 +79,20 @@ python main.py
 
 启动后默认使用 **虚拟 CAN**，点击「连接」即可与内置仿真 ECU 交互。
 
+### 打包为可执行文件（分发他人）
+
+无需目标机器安装 Python：
+
+```bash
+pip install pyinstaller pillow
+python scripts/build_exe.py --clean
+```
+
+产物在 `dist/DiagTools/`，将**整个文件夹**压缩发送即可。接收方解压后
+双击 `DiagTools.exe` 直接使用；`resources/`（配置/ECU/DID定义）、
+`plugins/`（安全算法）均为可编辑文件，运行时生成的
+`logs/`、`data_recordings/`、`reports/` 都在 exe 旁边。
+
 ### 运行测试
 
 ```bash

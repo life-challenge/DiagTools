@@ -19,14 +19,15 @@ from PyQt6.QtWidgets import (
 )
 from PyQt6.QtCore import Qt
 
+from src.utils.paths import get_project_root
+
 
 class ReportCenterView(QWidget):
     """报告中心工作区"""
 
     def __init__(self, parent=None):
         super().__init__(parent)
-        self._project_root = os.path.dirname(os.path.dirname(
-            os.path.dirname(os.path.abspath(__file__))))
+        self._project_root = get_project_root()
         self._report_dir = os.path.join(self._project_root, "reports")
         self._init_ui()
         self.refresh()

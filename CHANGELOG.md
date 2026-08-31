@@ -3,6 +3,24 @@
 本文件记录 DiagTools 各版本的重要变更，格式遵循
 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)。
 
+## [1.4.0] - 2026-08-31
+
+### 新增
+- **可执行文件打包**（PyInstaller onedir）: 免安装Python直接分发使用
+  - `python scripts/build_exe.py --clean` 一键构建，产物在 dist/DiagTools/，
+    整个文件夹压缩即可发给他人
+  - 应用图标、windowed无控制台、排除未用Qt组件（发行体积约120MB）
+  - resources/、plugins/、bridge_worker.py 以文件形态置于exe旁：
+    配置可编辑、插件可替换、32位桥接脚本可被外部Python直接执行
+  - 运行时 logs/、data_recordings/、reports/ 生成在exe旁边，
+    不再写入解包临时目录
+- 新增 `src/utils/paths.py` 冻结感知的统一路径解析
+
+### 修复
+- 主窗口 `_project_root` 回溯层数错误：报告目录/ECU定义目录/
+  A2L、ODX导入对话框曾指向 src/ 而非项目根（预置bug，已随路径统一修复）
+- 安全算法插件目录改为锚定项目根（双击启动时不再依赖CWD）
+
 ## [1.3.0] - 2026-08-31
 
 ### 新增

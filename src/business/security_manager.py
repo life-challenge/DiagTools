@@ -20,6 +20,7 @@ import time
 from typing import Optional
 from src.log.log_manager import get_log_manager
 from src.business.bridge_manager import BridgeManager, BridgeError
+from src.utils.paths import get_plugins_dir
 
 # PE Machine类型 -> 位数描述
 _PE_MACHINE_BITS = {0x014C: 32, 0x8664: 64, 0xAA64: 64, 0x0200: 64}
@@ -166,8 +167,10 @@ class SecurityManager:
     管理安全算法插件的加载、卸载和调用。
     """
 
-    def __init__(self, plugins_dir: str = "plugins/security_algorithms"):
-        self._plugins_dir = plugins_dir
+    def __init__(self, plugins_dir: str = ""):
+        # 默认锚定到项目根（源码运行=仓库根；打包后=exe旁边），
+        # 避免双击启动时相对CWD找不到插件目录
+        self._plugins_dir = plugins_dir or get_plugins_dir()
         self._algorithms: dict[int, SecurityAlgorithmInfo] = {}  # level -> info
         self._configs: dict = {}  # 配置档案
         self._logger = get_log_manager().get_app_logger()

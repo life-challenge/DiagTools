@@ -18,6 +18,7 @@ from PyQt6.QtGui import QColor
 from src.ui.async_uds import UdsWorker
 from src.business.sequence_manager import (
     SequenceManager, SequenceStep, UdsSequence)
+from src.utils.paths import get_project_root, get_resource_path
 
 
 def _builtin_cases() -> list:
@@ -137,9 +138,7 @@ class TestCenterView(QWidget):
         self._lbl_summary.setText(f"{len(self._cases)} 个测试用例")
 
     def _load_sequence(self):
-        project_root = os.path.dirname(os.path.dirname(os.path.dirname(
-            os.path.dirname(os.path.abspath(__file__)))))
-        start_dir = os.path.join(project_root, "resources", "sequences")
+        start_dir = get_resource_path("sequences")
         filepath, _ = QFileDialog.getOpenFileName(
             self, "加载测试序列", start_dir, "JSON Files (*.json)")
         if not filepath:
@@ -227,9 +226,7 @@ class TestCenterView(QWidget):
     # ---------------- 报告 ----------------
 
     def _export_report(self):
-        project_root = os.path.dirname(os.path.dirname(os.path.dirname(
-            os.path.dirname(os.path.abspath(__file__)))))
-        report_dir = os.path.join(project_root, "reports")
+        report_dir = os.path.join(get_project_root(), "reports")
         os.makedirs(report_dir, exist_ok=True)
         default_name = f"test_report_{time.strftime('%Y%m%d_%H%M%S')}.csv"
         filepath, _ = QFileDialog.getSaveFileName(

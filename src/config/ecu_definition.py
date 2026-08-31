@@ -33,6 +33,7 @@ import os
 import json
 from dataclasses import dataclass, field
 from src.log.log_manager import get_log_manager
+from src.utils.paths import get_resource_path
 
 
 @dataclass
@@ -82,9 +83,7 @@ def load_ecu_definitions(base_dir: str = None) -> list:
     logger = get_log_manager().get_app_logger()
 
     if base_dir is None:
-        project_root = os.path.dirname(os.path.dirname(
-            os.path.dirname(os.path.abspath(__file__))))
-        base_dir = os.path.join(project_root, "resources", "ecu")
+        base_dir = get_resource_path("ecu")
 
     defs = []
     if not os.path.isdir(base_dir):

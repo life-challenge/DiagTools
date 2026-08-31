@@ -5,6 +5,8 @@ import json
 from typing import Optional
 from datetime import datetime
 
+from src.utils.paths import get_project_root
+
 
 class ConfigManager:
     """配置方案管理器
@@ -25,8 +27,7 @@ class ConfigManager:
             return
 
         if config_dir is None:
-            project_root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-            config_dir = os.path.join(project_root, "resources", "config")
+            config_dir = os.path.join(get_project_root(), "resources", "config")
 
         self._config_dir = config_dir
         self._current_config = {}

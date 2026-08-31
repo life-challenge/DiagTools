@@ -6,6 +6,8 @@ import time
 from datetime import datetime
 from typing import Optional
 
+from src.utils.paths import get_project_root
+
 
 # 日志目录定义
 LOG_SUBDIRS = {
@@ -50,9 +52,8 @@ class LogManager:
             return
 
         if log_base_dir is None:
-            # 默认使用项目根目录下的logs文件夹
-            project_root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-            log_base_dir = os.path.join(project_root, "logs")
+            # 默认使用项目根目录下的logs文件夹（打包后为exe旁边）
+            log_base_dir = os.path.join(get_project_root(), "logs")
 
         self._log_base_dir = log_base_dir
         self._loggers = {}

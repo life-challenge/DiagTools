@@ -19,11 +19,10 @@ from PyQt6.QtWidgets import (
 from PyQt6.QtCore import Qt, pyqtSignal
 from src.business.did_manager import DidManager, DidValue
 from src.ui.widgets.trend_chart import TrendChart
+from src.utils.paths import get_project_root, get_resource_path
 
-# 数据录制输出目录: <项目根>/data_recordings
-_RECORD_DIR = os.path.join(
-    os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(
-        os.path.abspath(__file__))))), "data_recordings")
+# 数据录制输出目录: <项目根>/data_recordings（打包后为exe旁边）
+_RECORD_DIR = os.path.join(get_project_root(), "data_recordings")
 
 
 class DataStreamPanel(QWidget):
@@ -153,9 +152,7 @@ class DataStreamPanel(QWidget):
 
     def _import_definitions(self):
         """从DID定义JSON导入全部信号"""
-        project_root = os.path.dirname(os.path.dirname(os.path.dirname(
-            os.path.dirname(os.path.abspath(__file__)))))
-        start_dir = os.path.join(project_root, "resources", "did_definitions")
+        start_dir = get_resource_path("did_definitions")
         filepath, _ = QFileDialog.getOpenFileName(
             self, "加载DID定义", start_dir, "JSON Files (*.json)")
         if not filepath:

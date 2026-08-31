@@ -8,6 +8,7 @@ from PyQt6.QtWidgets import (QWidget, QVBoxLayout, QHBoxLayout, QGroupBox,
 from PyQt6.QtCore import Qt, QTimer
 from PyQt6.QtGui import QColor, QFont
 from src.business.did_manager import DidManager, DidDefinition
+from src.utils.paths import get_resource_path
 
 
 class DidPanel(QWidget):
@@ -132,9 +133,7 @@ class DidPanel(QWidget):
         layout.addWidget(self._log_text)
 
     def _load_definitions(self):
-        project_root = os.path.dirname(os.path.dirname(os.path.dirname(
-            os.path.dirname(os.path.abspath(__file__)))))
-        start_dir = os.path.join(project_root, "resources", "did_definitions")
+        start_dir = get_resource_path("did_definitions")
         filepath, _ = QFileDialog.getOpenFileName(
             self, "加载DID定义", start_dir, "JSON Files (*.json)")
         if filepath:
