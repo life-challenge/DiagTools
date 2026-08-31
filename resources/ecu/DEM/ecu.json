@@ -1,0 +1,12 @@
+{
+    "name": "DEM",
+    "description": "Drive Electronic Module",
+    "tx_id": "0x715",
+    "rx_id": "0x795",
+    "info_dids": {
+        "VIN": "F190",
+        "硬件版本": "F193",
+        "软件版本": "F195",
+        "零件号": "F187"
+    }
+}

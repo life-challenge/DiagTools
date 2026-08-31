@@ -1,0 +1,43 @@
+{
+  "version": "1.0.0",
+  "created": "2026-08-29T00:00:00",
+  "can": {
+    "interface_type": "pcan",
+    "channel": "PCAN_USBBUS1",
+    "bitrate": 500000,
+    "req_id": 1812,
+    "resp_id": 1940
+  },
+  "ecus": [
+    {
+      "name": "ECU_01",
+      "req_id": "0x7E0",
+      "resp_id": "0x7E8",
+      "description": "默认ECU"
+    }
+  ],
+  "session": {
+    "auto_tester_present": true,
+    "tester_present_interval_ms": 2000
+  },
+  "log": {
+    "level": "DEBUG",
+    "retention_days": 30
+  },
+  "ui": {
+    "theme": "dark",
+    "timestamp_mode": "absolute"
+  },
+  "modified": "2026-08-31T11:16:15.121664",
+  "project": {
+    "current_ecu": "DASH",
+    "hidden_ecus": [],
+    "recent": [
+      "d:\\DiagTools\\resources\\config\\default_config.json"
+    ]
+  },
+  "security": {
+    "python32_path": "D:/Python32/python.exe"
+  },
+  "project_version": "2.2"
+}

@@ -1,0 +1,45 @@
+{
+  "dids": [
+    {
+      "id": "0xF190",
+      "name": "VIN",
+      "description": "车辆识别号",
+      "data_length": 17,
+      "data_type": "ascii",
+      "byte_order": "big_endian"
+    },
+    {
+      "id": "0xF191",
+      "name": "ECU_Software_Version",
+      "description": "ECU软件版本号",
+      "data_length": 10,
+      "data_type": "ascii"
+    },
+    {
+      "id": "0x0100",
+      "name": "Engine_Speed",
+      "description": "发动机转速",
+      "data_length": 2,
+      "data_type": "uint16",
+      "byte_order": "big_endian",
+      "scaling": 0.25,
+      "offset": 0,
+      "unit": "rpm",
+      "min_value": 0,
+      "max_value": 16383.75
+    },
+    {
+      "id": "0x0102",
+      "name": "Coolant_Temp",
+      "description": "冷却液温度",
+      "data_length": 1,
+      "data_type": "uint8",
+      "byte_order": "big_endian",
+      "scaling": 1,
+      "offset": -40,
+      "unit": "°C",
+      "min_value": -40,
+      "max_value": 215
+    }
+  ]
+}

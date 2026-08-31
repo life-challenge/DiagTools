@@ -1,0 +1,13 @@
+{
+    "name": "DASH",
+    "description": "DASH Module",
+    "tx_id": "0x714",
+    "rx_id": "0x794",
+    "functional_tx_id": "0x7DF",
+    "info_dids": {
+        "VIN": "F190",
+        "硬件版本": "F193",
+        "软件版本": "F195",
+        "零件号": "F187"
+    }
+}

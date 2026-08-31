@@ -1,0 +1,35 @@
+# ---------- Python ----------
+__pycache__/
+*.py[cod]
+*.egg-info/
+.eggs/
+build/
+dist/
+.venv/
+venv/
+
+# ---------- 运行时产物 ----------
+# 日志与报文记录（按时间自动生成）
+logs/
+data_recordings/
+reports/
+
+# 导入功能导出的解析结果（运行时生成）
+resources/odx/
+resources/a2l/
+
+# 用户项目文件（含个人设备配置）
+*.dproj
+
+# ---------- 二进制/私有资产 ----------
+# 安全算法 DLL 通常为 OEM 私有产物，不随仓库发布；
+# Python 示例算法（*.py）保留在仓库中
+plugins/**/*.dll
+
+# ---------- IDE / 系统 ----------
+.idea/
+.vscode/
+*.swp
+Thumbs.db
+desktop.ini
+.DS_Store

@@ -1,0 +1,11 @@
+{
+    "name": "ABS",
+    "description": "Anti-lock Braking System",
+    "tx_id": "0x730",
+    "rx_id": "0x7B0",
+    "info_dids": {
+        "VIN": "F190",
+        "硬件版本": "F193",
+        "软件版本": "F195"
+    }
+}

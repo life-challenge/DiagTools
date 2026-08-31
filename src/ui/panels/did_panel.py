@@ -1,0 +1,326 @@
+"""DID读取/写入面板"""
+
+import os
+from PyQt6.QtWidgets import (QWidget, QVBoxLayout, QHBoxLayout, QGroupBox,
+                              QLabel, QPushButton, QTableWidget, QTableWidgetItem,
+                              QHeaderView, QLineEdit, QComboBox, QTextEdit,
+                              QFileDialog, QCheckBox, QSpinBox, QGridLayout)
+from PyQt6.QtCore import Qt, QTimer
+from PyQt6.QtGui import QColor, QFont
+from src.business.did_manager import DidManager, DidDefinition
+
+
+class DidPanel(QWidget):
+    """DID读取/写入面板"""
+
+    def __init__(self, uds_client=None, parent=None):
+        super().__init__(parent)
+        self._uds_client = uds_client
+        self._did_manager = DidManager()
+        self._poll_timer = None
+        self._init_ui()
+
+    def set_uds_client(self, client):
+        self._uds_client = client
+
+    def _init_ui(self):
+        layout = QVBoxLayout(self)
+
+        # 工具栏
+        toolbar = QHBoxLayout()
+        self._load_def_btn = QPushButton("加载定义")
+        self._load_def_btn.clicked.connect(self._load_definitions)
+        toolbar.addWidget(self._load_def_btn)
+
+        self._read_btn = QPushButton("读取选中")
+        self._read_btn.clicked.connect(self._read_selected)
+        toolbar.addWidget(self._read_btn)
+
+        self._read_all_btn = QPushButton("批量读取")
+        self._read_all_btn.clicked.connect(self._read_all)
+        toolbar.addWidget(self._read_all_btn)
+
+        self._write_btn = QPushButton("写入")
+        self._write_btn.clicked.connect(self._write_did)
+        toolbar.addWidget(self._write_btn)
+
+        self._export_btn = QPushButton("导出")
+        self._export_btn.clicked.connect(self._export_csv)
+        toolbar.addWidget(self._export_btn)
+
+        self._poll_check = QCheckBox("自动刷新")
+        self._poll_check.stateChanged.connect(self._toggle_polling)
+        toolbar.addWidget(self._poll_check)
+
+        self._interval_spin = QSpinBox()
+        self._interval_spin.setRange(100, 60000)
+        self._interval_spin.setValue(1000)
+        self._interval_spin.setSuffix(" ms")
+        toolbar.addWidget(self._interval_spin)
+
+        toolbar.addStretch()
+
+        toolbar.addWidget(QLabel("搜索:"))
+        self._search_edit = QLineEdit()
+        self._search_edit.setPlaceholderText("DID或名称")
+        self._search_edit.setFixedWidth(140)
+        self._search_edit.textChanged.connect(self._apply_search)
+        toolbar.addWidget(self._search_edit)
+        layout.addLayout(toolbar)
+
+        # DID列表表格
+        self._table = QTableWidget()
+        self._table.setColumnCount(7)
+        self._table.setHorizontalHeaderLabels(
+            ["DID", "名称", "类型", "当前值", "原始数据", "单位", "状态"])
+        header = self._table.horizontalHeader()
+        header.setSectionResizeMode(1, QHeaderView.ResizeMode.Stretch)
+        self._table.setSelectionBehavior(
+            QTableWidget.SelectionBehavior.SelectRows)
+        layout.addWidget(self._table)
+
+        # 手动操作区（§5: DID + 读取/写入 + Request/Response/Decoded）
+        manual_group = QGroupBox("手动读取/写入")
+        manual_layout = QGridLayout()
+        mono = QFont("Consolas", 10)
+
+        manual_layout.addWidget(QLabel("DID:"), 0, 0)
+        self._manual_did = QLineEdit()
+        self._manual_did.setPlaceholderText("如 F190")
+        self._manual_did.setMaximumWidth(100)
+        manual_layout.addWidget(self._manual_did, 0, 1)
+
+        read_btn = QPushButton("读取")
+        read_btn.clicked.connect(self._manual_read)
+        manual_layout.addWidget(read_btn, 0, 2)
+
+        write_btn = QPushButton("写入")
+        write_btn.clicked.connect(self._manual_write)
+        manual_layout.addWidget(write_btn, 0, 3)
+
+        manual_layout.addWidget(QLabel("写入数据(HEX):"), 0, 4)
+        self._manual_data = QLineEdit()
+        self._manual_data.setPlaceholderText("如: 48 65 6C 6C 6F")
+        manual_layout.addWidget(self._manual_data, 0, 5)
+
+        def _mk_val_label():
+            lbl = QLabel("--")
+            lbl.setFont(mono)
+            lbl.setTextInteractionFlags(
+                Qt.TextInteractionFlag.TextSelectableByMouse)
+            return lbl
+
+        for row, title in enumerate(["Request:", "Response:", "Decoded:"], start=1):
+            key = QLabel(title)
+            key.setStyleSheet("color: #888;")
+            manual_layout.addWidget(key, row, 0)
+        self._lbl_req = _mk_val_label()
+        self._lbl_resp = _mk_val_label()
+        self._lbl_decoded = _mk_val_label()
+        manual_layout.addWidget(self._lbl_req, 1, 1, 1, 5)
+        manual_layout.addWidget(self._lbl_resp, 2, 1, 1, 5)
+        manual_layout.addWidget(self._lbl_decoded, 3, 1, 1, 5)
+        manual_layout.setColumnStretch(5, 1)
+
+        manual_group.setLayout(manual_layout)
+        layout.addWidget(manual_group)
+
+        # 日志
+        self._log_text = QTextEdit()
+        self._log_text.setReadOnly(True)
+        self._log_text.setMaximumHeight(120)
+        layout.addWidget(self._log_text)
+
+    def _load_definitions(self):
+        project_root = os.path.dirname(os.path.dirname(os.path.dirname(
+            os.path.dirname(os.path.abspath(__file__)))))
+        start_dir = os.path.join(project_root, "resources", "did_definitions")
+        filepath, _ = QFileDialog.getOpenFileName(
+            self, "加载DID定义", start_dir, "JSON Files (*.json)")
+        if filepath:
+            self.import_definitions(filepath)
+
+    def import_definitions(self, filepath: str) -> int:
+        """程序化导入DID定义（菜单/项目加载入口），返回导入数量"""
+        count = self._did_manager.load_definitions_from_json(filepath)
+        if count > 0:
+            self._refresh_table()
+            self._log(f"加载了 {count} 个DID定义: {os.path.basename(filepath)}")
+        else:
+            self._log(f"DID定义导入失败或为空: {filepath}")
+        return count
+
+    def _refresh_table(self):
+        definitions = self._did_manager.definitions
+        self._table.setRowCount(len(definitions))
+
+        for row, (did_id, defn) in enumerate(sorted(definitions.items())):
+            self._table.setItem(row, 0, QTableWidgetItem(f"0x{did_id:04X}"))
+            self._table.setItem(row, 1, QTableWidgetItem(defn.name))
+            self._table.setItem(row, 2, QTableWidgetItem(defn.data_type))
+
+            val = self._did_manager.get_value(did_id)
+            if val:
+                self._table.setItem(row, 3, QTableWidgetItem(val.display_value))
+                self._table.setItem(row, 4, QTableWidgetItem(val.raw_data.hex(" ")))
+                # 值域颜色
+                if val.is_in_range is not None:
+                    color = QColor("#4CAF50") if val.is_in_range else QColor("#F44336")
+                    self._table.item(row, 3).setForeground(color)
+            else:
+                self._table.setItem(row, 3, QTableWidgetItem("--"))
+                self._table.setItem(row, 4, QTableWidgetItem("--"))
+
+            self._table.setItem(row, 5, QTableWidgetItem(defn.unit))
+            self._table.setItem(row, 6, QTableWidgetItem(""))
+
+    def _read_selected(self):
+        row = self._table.currentRow()
+        if row < 0:
+            return
+        did_text = self._table.item(row, 0).text()
+        did_id = int(did_text, 16)
+        self._do_read_did(did_id)
+
+    def _read_all(self):
+        for did_id in self._did_manager.definitions:
+            self._do_read_did(did_id)
+        self._refresh_table()
+
+    def _do_read_did(self, did_id: int, show_detail: bool = False):
+        if not self._uds_client:
+            self._log("未连接UDS客户端")
+            if show_detail:
+                self._show_detail(did_id, None, None, "未连接")
+            return
+        resp = self._uds_client.read_data_by_identifier(did_id)
+        if resp and len(resp) >= 3 and resp[0] == 0x62:
+            raw_data = resp[3:]
+            val = self._did_manager.update_value(did_id, raw_data)
+            self._log(f"读取 0x{did_id:04X}: {val.display_value}")
+            if show_detail:
+                self._show_detail(did_id, resp, resp, self._decode_payload(raw_data))
+        else:
+            self._log(f"读取 0x{did_id:04X} 失败")
+            if show_detail:
+                self._show_detail(did_id, resp, None, "读取失败")
+
+    @staticmethod
+    def _decode_payload(payload: bytes) -> str:
+        """Decoded优先按ASCII显示（如VIN），不可打印内容回退HEX"""
+        try:
+            text = payload.decode("ascii").strip("\x00 ")
+            if text and all(32 <= ord(c) < 127 for c in text):
+                return text
+        except UnicodeDecodeError:
+            pass
+        return payload.hex(" ").upper()
+
+    def _show_detail(self, did_id: int, req, resp, decoded: str):
+        """手动操作区显示 Request/Response/Decoded（§5）"""
+        req_bytes = bytes([0x22, (did_id >> 8) & 0xFF, did_id & 0xFF])
+        self._lbl_req.setText(req_bytes.hex(" ").upper())
+        self._lbl_resp.setText(resp.hex(" ").upper() if resp else "--")
+        self._lbl_decoded.setText(decoded or "--")
+
+    def _write_did(self):
+        row = self._table.currentRow()
+        if row < 0:
+            return
+        did_text = self._table.item(row, 0).text()
+        did_id = int(did_text, 16)
+        data_hex = self._manual_data.text().strip()
+        if not data_hex:
+            self._log("请输入写入数据")
+            return
+        try:
+            data = bytes.fromhex(data_hex.replace(" ", ""))
+            self._do_write_did(did_id, data)
+        except ValueError:
+            self._log("HEX数据格式错误")
+
+    def _manual_read(self):
+        did_text = self._manual_did.text().strip()
+        if not did_text:
+            return
+        try:
+            did_id = int(did_text.replace("0x", ""), 16)
+            self._do_read_did(did_id, show_detail=True)
+            self._refresh_table()
+        except ValueError:
+            self._log("DID格式错误")
+
+    def _manual_write(self):
+        did_text = self._manual_did.text().strip()
+        data_hex = self._manual_data.text().strip()
+        if not did_text or not data_hex:
+            self._log("请输入DID和写入数据")
+            return
+        try:
+            did_id = int(did_text.replace("0x", ""), 16)
+            data = bytes.fromhex(data_hex.replace(" ", ""))
+            self._do_write_did(did_id, data)
+        except ValueError:
+            self._log("数据格式错误")
+
+    def _do_write_did(self, did_id: int, data: bytes):
+        if not self._uds_client:
+            self._log("未连接UDS客户端")
+            return
+        resp = self._uds_client.write_data_by_identifier(did_id, data)
+        ok = bool(resp and resp[0] == 0x6E)
+        self._log(f"写入 0x{did_id:04X} {'成功' if ok else '失败'}")
+        # 手动操作区展示写入详情（§5）
+        req = bytes([0x2E, (did_id >> 8) & 0xFF, did_id & 0xFF]) + data
+        self._lbl_req.setText(req.hex(" ").upper())
+        self._lbl_resp.setText(resp.hex(" ").upper() if resp else "--")
+        self._lbl_decoded.setText("写入成功" if ok else "写入失败")
+        if not ok and resp and resp[0] == 0x7F and len(resp) > 2:
+            self._lbl_decoded.setText(f"负响应 0x{resp[2]:02X}")
+
+    def _apply_search(self, text: str):
+        """按DID或名称过滤表格行"""
+        text = text.strip().upper()
+        for row in range(self._table.rowCount()):
+            if not text:
+                self._table.setRowHidden(row, False)
+                continue
+            did_cell = self._table.item(row, 0)
+            name_cell = self._table.item(row, 1)
+            match = (did_cell and text in did_cell.text().upper()) or \
+                    (name_cell and text in name_cell.text().upper())
+            self._table.setRowHidden(row, not match)
+
+    def _export_csv(self):
+        """导出当前DID表到CSV"""
+        filepath, _ = QFileDialog.getSaveFileName(
+            self, "导出DID数据", "did_data.csv", "CSV Files (*.csv)")
+        if not filepath:
+            return
+        import csv
+        with open(filepath, "w", newline="", encoding="utf-8-sig") as f:
+            writer = csv.writer(f)
+            writer.writerow(["DID", "名称", "类型", "当前值", "原始数据", "单位"])
+            for row in range(self._table.rowCount()):
+                writer.writerow([
+                    self._table.item(row, c).text() if self._table.item(row, c) else ""
+                    for c in range(6)])
+        self._log(f"已导出到 {filepath}")
+
+    def _toggle_polling(self, state):
+        if state == Qt.CheckState.Checked.value:
+            interval = self._interval_spin.value() / 1000.0
+            did_ids = list(self._did_manager.definitions.keys())
+            if did_ids and self._uds_client:
+                self._did_manager.start_polling(
+                    did_ids, self._uds_client, interval,
+                    lambda did_id, val: self._refresh_table())
+                self._log(f"启动轮询: {len(did_ids)} 个DID, 间隔 {interval}s")
+        else:
+            self._did_manager.stop_polling()
+            self._log("停止轮询")
+
+    def _log(self, msg: str):
+        import time
+        ts = time.strftime("%H:%M:%S")
+        self._log_text.append(f"[{ts}] {msg}")

@@ -1,0 +1,11 @@
+{
+    "name": "BCM",
+    "description": "Body Control Module",
+    "tx_id": "0x720",
+    "rx_id": "0x7A0",
+    "info_dids": {
+        "VIN": "F190",
+        "硬件版本": "F193",
+        "软件版本": "F195"
+    }
+}
