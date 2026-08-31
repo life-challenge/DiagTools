@@ -3,6 +3,20 @@
 本文件记录 DiagTools 各版本的重要变更，格式遵循
 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)。
 
+## [1.1.0] - 2026-08-31
+
+### 新增
+- 特殊功能页：ECU Definition `special_functions` 配置驱动
+  （routine/did/reset/raw 四类动作，后台线程执行，正/负响应判定）
+- 全局异常防护：未捕获异常记日志并弹窗，不再静默闪退；
+  Qt 消息接入日志系统
+- 版本号集中管理（`src.__version__`）
+- GitHub Actions CI：双 Python 版本编译 + 单元测试
+
+### 变更
+- 删除最后一个占位视图（placeholder_view.py）
+- 新增特殊功能单元测试（36 项全部通过）
+
 ## [1.0.0] - 2026-08-31
 
 ### 新增

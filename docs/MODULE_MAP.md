@@ -85,7 +85,8 @@ d:\DiagTools
 
 ### ui/panels
 connection / session / did / datastream / dtc / io / routine /
-security / sequence / raw / replay（重放） / dbc（数据库浏览解码） / flash
+security / sequence / raw / replay（重放） / dbc（数据库浏览解码） / flash /
+special（特殊功能，ECU配置驱动 routine/did/reset/raw）
 
 ### ui/dialogs
 settings_dialog（设置）、a2l_import_dialog（A2L解析/导出）、

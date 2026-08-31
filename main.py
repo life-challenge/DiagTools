@@ -2,18 +2,55 @@
 
 import sys
 import os
+import traceback
 
 # 确保项目根目录在Python路径中
 project_root = os.path.dirname(os.path.abspath(__file__))
 if project_root not in sys.path:
     sys.path.insert(0, project_root)
 
-from PyQt6.QtWidgets import QApplication
-from PyQt6.QtCore import Qt
+from PyQt6.QtWidgets import QApplication, QMessageBox
+from PyQt6.QtCore import Qt, qInstallMessageHandler, QtMsgType
 
+import src
 from src.ui.main_window import MainWindow
 from src.log.log_manager import LogManager
 from src.utils.config_manager import ConfigManager
+
+
+def _install_crash_handlers(logger):
+    """安装全局异常钩子: 未捕获异常记日志并弹窗，避免静默闪退。
+
+    此前会话切换等场景的闪退难以定位，问题在于异常被吞掉且无日志。
+    """
+    def _excepthook(exc_type, exc_value, exc_tb):
+        if issubclass(exc_type, KeyboardInterrupt):
+            sys.__excepthook__(exc_type, exc_value, exc_tb)
+            return
+        detail = "".join(traceback.format_exception(
+            exc_type, exc_value, exc_tb))
+        logger.error("未捕获异常:\n%s", detail)
+        try:
+            if QApplication.instance() is not None:
+                QMessageBox.critical(
+                    None, "DiagTools - 程序异常",
+                    f"发生未处理的错误，程序将尝试继续运行。\n\n"
+                    f"{exc_type.__name__}: {exc_value}\n\n"
+                    f"详情已记录到日志（logs/app/）。")
+        except Exception:
+            pass  # 弹窗失败时至少保证日志已落盘
+
+    sys.excepthook = _excepthook
+
+    def _qt_message_handler(msg_type, context, message):
+        level = {QtMsgType.QtDebugMsg: "debug",
+                 QtMsgType.QtInfoMsg: "info",
+                 QtMsgType.QtWarningMsg: "warning",
+                 QtMsgType.QtCriticalMsg: "error",
+                 QtMsgType.QtFatalMsg: "error"}.get(msg_type, "info")
+        getattr(logger, level, logger.info)("Qt: %s", message)
+
+    qInstallMessageHandler(_qt_message_handler)
 
 
 def main():
@@ -22,8 +59,11 @@ def main():
     log_manager = LogManager()
     app_logger = log_manager.get_app_logger()
     app_logger.info("=" * 50)
-    app_logger.info("DiagTools 启动")
+    app_logger.info("DiagTools %s 启动", src.__version__)
     app_logger.info("=" * 50)
+
+    # 全局异常钩子（闪退防护）
+    _install_crash_handlers(app_logger)
 
     # 初始化配置管理器
     config = ConfigManager()
@@ -35,7 +75,7 @@ def main():
     app = QApplication(sys.argv)
     app.setApplicationName("DiagTools")
     app.setOrganizationName("DiagTools")
-    app.setApplicationVersion("1.0.0")
+    app.setApplicationVersion(src.__version__)
 
     # 创建主窗口
     window = MainWindow()

@@ -16,10 +16,17 @@ ecu.json 格式:
         "tx_id": "0x714",
         "rx_id": "0x794",
         "functional_tx_id": "0x7DF",
-        "info_dids": {"VIN": "F190", "硬件版本": "F193", "软件版本": "F195"}
+        "info_dids": {"VIN": "F190", "硬件版本": "F193", "软件版本": "F195"},
+        "special_functions": [
+            {"name": "清除历史故障", "type": "routine", "id": "0x0203", "description": "..."},
+            {"name": "读软件版本", "type": "did", "id": "F195"},
+            {"name": "软复位", "type": "reset", "reset_type": "01"},
+            {"name": "自定义命令", "type": "raw", "data": "10 03"}
+        ]
     }
 
 functional_tx_id 可选，缺省 0x7DF（标准功能寻址请求ID）。
+special_functions 可选，驱动诊断视图-特殊功能页（无则显示无定义提示）。
 """
 
 import os
@@ -39,6 +46,8 @@ class EcuDefinition:
     functional_tx_id: int = 0x7DF
     # 信息DID: {显示名: DID十六进制字符串}，用于ECU信息卡读取
     info_dids: dict = field(default_factory=dict)
+    # 特殊功能: [{name, type(routine/did/reset/raw), id, reset_type, data, description}]
+    special_functions: list = field(default_factory=list)
     # 定义文件所在目录（后续可扩展 did.json / dtc.json / flash.json 等）
     def_dir: str = ""
 
@@ -97,6 +106,7 @@ def load_ecu_definitions(base_dir: str = None) -> list:
                 functional_tx_id=_parse_id(
                     data.get("functional_tx_id"), 0x7DF),
                 info_dids=data.get("info_dids", {}) or {},
+                special_functions=data.get("special_functions") or [],
                 def_dir=os.path.join(base_dir, entry),
             ))
         except Exception as e:

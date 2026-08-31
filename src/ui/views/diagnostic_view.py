@@ -14,13 +14,13 @@ from PyQt6.QtWidgets import (QWidget, QVBoxLayout, QHBoxLayout, QGridLayout,
                               QStackedWidget, QScrollArea, QFrame)
 from PyQt6.QtCore import Qt, QThread
 from src.ui.async_uds import UdsWorker
-from src.ui.views.placeholder_view import PlaceholderView
 from src.ui.views.uds_service_view import UdsServiceView
 from src.ui.panels.dtc_panel import DtcPanel
 from src.ui.panels.did_panel import DidPanel
 from src.ui.panels.datastream_panel import DataStreamPanel
 from src.ui.panels.io_panel import IoPanel
 from src.ui.panels.routine_panel import RoutinePanel
+from src.ui.panels.special_panel import SpecialPanel
 from src.ui.panels.session_panel import SessionPanel
 from src.ui.panels.security_panel import SecurityPanel
 from src.ui.panels.sequence_panel import SequencePanel
@@ -97,8 +97,7 @@ class DiagnosticView(QWidget):
         self._datastream_panel = DataStreamPanel()
         self._io_panel = IoPanel()
         self._routine_panel = RoutinePanel()
-        self._special_view = PlaceholderView(
-            "特殊功能", "预留: ECU特定的特殊功能/变体编码入口（由ECU Definition扩展）")
+        self._special_view = SpecialPanel()
 
         # 高级诊断: 工程师入口（§4）
         self._uds_service_view = UdsServiceView()
@@ -270,9 +269,9 @@ class DiagnosticView(QWidget):
     def panels(self) -> list:
         """所有需要注入UDS客户端的子面板"""
         return [self._dtc_panel, self._did_panel, self._datastream_panel,
-                self._io_panel, self._routine_panel, self._session_panel,
-                self._security_panel, self._sequence_panel,
-                self._uds_service_view]
+                self._io_panel, self._routine_panel, self._special_view,
+                self._session_panel, self._security_panel,
+                self._sequence_panel, self._uds_service_view]
 
     @property
     def session_panel(self) -> SessionPanel:
@@ -306,6 +305,7 @@ class DiagnosticView(QWidget):
         self._st_diag_v2.setText("Locked")
         self._st_diag_v2.setStyleSheet("color: #888;")
         self._st_ecu_v1.setText(ecu.name)
+        self._special_view.set_ecu(ecu)
 
     def set_online(self, online: bool):
         self._online_label.setText("● Online" if online else "● Offline")

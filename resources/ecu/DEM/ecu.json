@@ -8,5 +8,31 @@
         "硬件版本": "F193",
         "软件版本": "F195",
         "零件号": "F187"
-    }
+    },
+    "special_functions": [
+        {
+            "name": "读软件版本",
+            "type": "did",
+            "id": "F195",
+            "description": "读取当前软件版本号 (0x22 F195)"
+        },
+        {
+            "name": "擦除例程测试",
+            "type": "routine",
+            "id": "0x0203",
+            "description": "启动例程 0x0203 (0x31 01 02 03)"
+        },
+        {
+            "name": "软复位",
+            "type": "reset",
+            "reset_type": "01",
+            "description": "ECU 软复位并回到默认会话 (0x11 01)"
+        },
+        {
+            "name": "切换扩展会话",
+            "type": "raw",
+            "data": "10 03",
+            "description": "自定义原始命令示例"
+        }
+    ]
 }
