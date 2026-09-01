@@ -14,7 +14,7 @@ from PyQt6.QtWidgets import (
     QMainWindow, QWidget, QVBoxLayout, QSplitter,
     QTabWidget, QToolBar, QStatusBar, QLabel, QMenu, QTreeWidget,
     QTreeWidgetItem, QInputDialog, QMessageBox, QFileDialog, QSizePolicy,
-    QApplication, QScrollArea, QFrame
+    QApplication, QScrollArea, QFrame, QPushButton
 )
 from PyQt6.QtCore import Qt, QTimer, QThread, pyqtSignal
 from PyQt6.QtGui import QAction, QKeySequence, QFont
@@ -42,6 +42,7 @@ from src.protocol.uds_services import UdsService, SERVICE_NAMES
 from src.ui.async_uds import UdsWorker
 from src.business.ecu_scanner import EcuScanner
 from src.business.report_generator import ReportGenerator
+import src  # __version__ 统一版本号（关于/检查更新）
 
 # 会话类型 -> 状态栏显示名
 _SESSION_NAMES = {0x01: "默认", 0x02: "编程", 0x03: "扩展", 0x04: "安全"}
@@ -177,7 +178,7 @@ class MainWindow(QMainWindow):
         self._log_dock = LogDock()
         # ECU诊断子面板日志统一汇入底部业务日志（面板已不内置日志窗口）
         self._diag_view.business_log.connect(self._log_dock.log_business)
-        self._log_dock.setMinimumHeight(170)  # 防止被挤压到无法阅读报文
+        # 日志面板最小高度由LogDock自管（展开170防挤压/折叠收缩到头部一行）
         self._v_splitter.addWidget(self._log_dock)
         self._v_splitter.setStretchFactor(0, 1)
         self._v_splitter.setStretchFactor(1, 0)
@@ -337,9 +338,14 @@ class MainWindow(QMainWindow):
             self._nav.setCurrentIndex(NAV_TOOLS)
         elif data == "__cfg_ecu__":
             self._open_ecu_definition_dir()
-        elif data in ("__cfg_flash__", "__cfg_a2l__"):
+        elif data == "__cfg_flash__":
+            # Flash配置已实现（文件→导入→Flash配置），双击直达刷写中心
+            self._nav.setCurrentIndex(NAV_FLASH)
             self._statusbar.showMessage(
-                "Flash / A2L 配置为 P1/P2 预留，将随标定中心实现", 3000)
+                "刷写配置可经 文件→导入→Flash配置 导入（JSON）", 4000)
+        elif data == "__cfg_a2l__":
+            # A2L导入已实现: 打开解析对话框（导出后记录到项目配置）
+            self._on_import_a2l()
 
     def _on_tree_context_menu(self, pos):
         item = self._project_tree.itemAt(pos)
@@ -582,32 +588,46 @@ class MainWindow(QMainWindow):
         return action
 
     def _init_toolbar(self):
-        """全局工具栏（§2.1）: 连接 | 断开 | 全车扫描 | 日志（主题移入设置）"""
+        """全局工具栏（§2.1）: 连接 | 断开 | 全车扫描 | 日志（主题移入设置）
+
+        连接/断开为互斥操作对：用红绿对比色实体按钮呈现，
+        未连接时"断开"禁用变灰、已连接时"连接"禁用变灰——
+        任何一个时刻只有可执行的那个是彩色醒目的。
+        其余按钮用Unicode字形图标+文字，保持轻量（无需图标资源文件）。
+        """
         toolbar = QToolBar("主工具栏")
         toolbar.setMovable(False)
         self.addToolBar(toolbar)
 
-        self._btn_connect = QAction("连接", self)
+        self._btn_connect = QPushButton("▶ 连接")
+        self._btn_connect.setObjectName("btn_connect")
         self._btn_connect.setShortcut("F5")
-        self._btn_connect.triggered.connect(self._on_connect)
-        toolbar.addAction(self._btn_connect)
+        self._btn_connect.setToolTip("建立诊断连接 (F5)")
+        self._btn_connect.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._btn_connect.clicked.connect(self._on_connect)
+        toolbar.addWidget(self._btn_connect)
 
-        self._btn_disconnect = QAction("断开", self)
+        self._btn_disconnect = QPushButton("■ 断开")
+        self._btn_disconnect.setObjectName("btn_disconnect")
         self._btn_disconnect.setShortcut("F6")
-        self._btn_disconnect.triggered.connect(self._on_disconnect)
-        toolbar.addAction(self._btn_disconnect)
+        self._btn_disconnect.setToolTip("断开诊断连接 (F6)")
+        self._btn_disconnect.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._btn_disconnect.clicked.connect(self._on_disconnect)
+        toolbar.addWidget(self._btn_disconnect)
 
         toolbar.addSeparator()
 
-        self._btn_scan = QAction("全车扫描", self)
+        self._btn_scan = QAction("🔍 全车扫描", self)
         self._btn_scan.setShortcut("F7")
+        self._btn_scan.setToolTip("对已定义地址逐个探测在线ECU (F7)")
         self._btn_scan.triggered.connect(self._on_scan)
         toolbar.addAction(self._btn_scan)
 
         toolbar.addSeparator()
 
-        self._btn_log = QAction("日志", self)
+        self._btn_log = QAction("📋 日志", self)
         self._btn_log.setShortcut("Ctrl+L")
+        self._btn_log.setToolTip("折叠/展开底部日志面板 (Ctrl+L)")
         self._btn_log.triggered.connect(self._toggle_log_dock)
         toolbar.addAction(self._btn_log)
 
@@ -620,9 +640,9 @@ class MainWindow(QMainWindow):
         toolbar.addWidget(spacer)
         toolbar.addWidget(self._conn_label)
 
-        # 按钮联动: 连接后"连接"禁用/"断开"与"扫描"可用；初始未连接
-        self._btn_disconnect.setEnabled(False)
-        self._btn_scan.setEnabled(False)
+        # 初始未连接态: 绿色"连接"可点、"断开"/"扫描"灰色禁用
+        # （后续由 _set_toolbar_connected 随连接状态切换）
+        self._set_toolbar_connected(False)
 
     def _init_statusbar(self):
         """状态栏（§8）: 独立状态块，块间有边框分隔"""
@@ -832,10 +852,7 @@ class MainWindow(QMainWindow):
             self._set_dot(self._lbl_uds, "UDS", True)
             self._lbl_vci.setText(f"VCI: {can_iface.interface_name}")
             self._lbl_bus.setText(bus_text)
-            # 工具栏按钮联动: 连接后"连接"禁用，"断开"与"全车扫描"可用
-            self._btn_connect.setEnabled(False)
-            self._btn_disconnect.setEnabled(True)
-            self._btn_scan.setEnabled(True)
+            self._set_toolbar_connected(True)
             self._conn_label.setText(
                 f"已连接 {can_iface.interface_name} | {bus_text}")
             self._conn_label.setStyleSheet("color: #4CAF50;")
@@ -875,9 +892,7 @@ class MainWindow(QMainWindow):
             self._set_dot(self._lbl_uds, "UDS", False)
             self._lbl_vci.setText("VCI: --")
             self._lbl_bus.setText("--")
-            self._btn_connect.setEnabled(True)
-            self._btn_disconnect.setEnabled(False)
-            self._btn_scan.setEnabled(False)
+            self._set_toolbar_connected(False)
             self._conn_label.setText("未连接")
             self._conn_label.setStyleSheet("color: #888;")
             self._refresh_overview_info()
@@ -974,8 +989,22 @@ class MainWindow(QMainWindow):
             return f"{UdsService.get_service_name(sid - 0x40)} - 正响应"
         return UdsService.get_service_name(sid)
 
+    def _set_toolbar_connected(self, connected: bool):
+        """工具栏启动/停止互补状态
+
+        未连接: "连接"黄色醒目可点；"断开"灰色禁用。
+        已连接: "连接"置灰不可再点；"断开"红色可点。
+        任何时刻只有一个按钮可操作，当前可执行的动作颜色醒目。
+        """
+        self._btn_connect.setEnabled(not connected)
+        self._btn_disconnect.setEnabled(connected)
+        self._btn_scan.setEnabled(connected)
+
     def _on_connect(self):
-        """工具栏连接按钮：委托给连接面板执行真实连接流程"""
+        """工具栏连接按钮：委托给连接面板执行真实连接流程
+
+        按钮仅在未连接时可点（已连接时置灰），无需防重复处理
+        """
         self._connection_panel._on_connect()
 
     def _on_disconnect(self):
@@ -1044,6 +1073,8 @@ class MainWindow(QMainWindow):
         self._statusbar.clearMessage()
         self._diag_view.session_panel.resume_keepalive()  # 恢复会话保持
         self._log_dock.log_business(f"ECU扫描异常: {msg}", "ERROR")
+        # 车辆总览拓扑黄色警示（区别于"扫描完成但离线"的灰色态）
+        self._overview_view.set_scan_failed(msg)
 
     def _start_worker(self, func, args: tuple, on_done, on_error,
                       worker_attr: str, thread_attr: str):
@@ -1305,12 +1336,6 @@ class MainWindow(QMainWindow):
             except Exception:
                 pass
 
-    def _reserved(self, name: str, stage: str):
-        """P1/P2预留功能提示"""
-        self._statusbar.showMessage(
-            f"{name}为 {stage} 预留，将随对应业务中心实现", 4000)
-        self._log_dock.log_business(f"{name}: {stage} 预留", "WARNING")
-
     # ---------------- 视图菜单 ----------------
 
     def _toggle_project_panel(self, visible: bool):
@@ -1465,13 +1490,17 @@ class MainWindow(QMainWindow):
         QMessageBox.information(
             self, "用户手册",
             "<h3>模块说明</h3><ul>"
+            "<li><b>车辆总览</b>: 项目信息卡 + ECU拓扑（在线状态由扫描/自检驱动）</li>"
             "<li><b>ECU诊断</b>: 信息卡 / 故障码 / 数据流 / DID / IO控制 / "
             "例程 / 特殊功能 / 高级诊断(UDS服务、Session、Security、Sequence)</li>"
             "<li><b>刷写中心</b>: 安全访问→擦除→下载→传输→校验→复位六步刷写</li>"
-            "<li><b>标定中心 / 测试中心</b>: P2/P1 预留</li>"
-            "<li><b>报文分析</b>: CAN报文会话级分析</li>"
+            "<li><b>标定中心</b>: DID标定表（批量读取→编辑→写入→回读校验）</li>"
+            "<li><b>测试中心</b>: 内置诊断用例+自定义序列，后台执行导出报告</li>"
+            "<li><b>报文分析</b>: CAN/UDS Trace、原始报文、报文重放、DBC数据库解码</li>"
+            "<li><b>报告中心</b>: 扫描/诊断/刷写报告统一管理（HTML/CSV/JSON）</li>"
             "<li><b>工具中心</b>: VCI/CAN通信配置</li>"
-            "</ul><p>诊断项目: 文件→保存诊断项目(Ctrl+S) 保存连接参数与"
+            "</ul><p>导入: 文件→导入 支持 DID/DTC配置、Flash配置、A2L、ODX/CDD。</p>"
+            "<p>诊断项目: 文件→保存诊断项目(Ctrl+S) 保存连接参数与"
             "ECU上下文，下次启动自动恢复。</p>")
 
     def _on_uds_reference(self):
@@ -1505,7 +1534,7 @@ class MainWindow(QMainWindow):
             "<tr><td>Ctrl+N / Ctrl+O / Ctrl+S</td>"
             "<td>新建 / 打开 / 保存诊断项目</td></tr>"
             "<tr><td>Ctrl+L</td><td>显示/隐藏日志面板</td></tr>"
-            "<tr><td>Ctrl+1 ~ Ctrl+6</td><td>切换一级导航</td></tr>"
+            "<tr><td>Ctrl+1 ~ Ctrl+8</td><td>切换一级导航</td></tr>"
             "<tr><td>Space</td><td>暂停/恢复 CAN Trace</td></tr>"
             "<tr><td>F11</td><td>全屏模式</td></tr>"
             "<tr><td>Alt+F4</td><td>退出</td></tr>"
@@ -1513,7 +1542,8 @@ class MainWindow(QMainWindow):
 
     def _on_check_update(self):
         QMessageBox.information(
-            self, "检查更新", "ECU Diagnostic Studio V2.1.0 已是最新版本")
+            self, "检查更新",
+            f"DiagTools v{src.__version__} 已是最新版本")
 
     def _on_feedback(self):
         QMessageBox.information(
@@ -1538,8 +1568,8 @@ class MainWindow(QMainWindow):
         QMessageBox.about(
             self, "关于 ECU Diagnostic Studio",
             "<h2>ECU Diagnostic Studio</h2>"
-            "<p>版本: 2.1.0 (V2.1 UI)</p>"
-            "<p>配置驱动的ECU工程诊断平台: 诊断 / 刷写 / 测试 / Trace</p>"
+            f"<p>版本: {src.__version__}</p>"
+            "<p>配置驱动的ECU工程诊断平台: 诊断 / 刷写 / 标定 / 测试 / Trace</p>"
             "<p>技术栈: Python + PyQt6 + python-can</p>"
         )
 

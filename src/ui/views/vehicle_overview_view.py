@@ -33,6 +33,8 @@ class VehicleOverviewView(QWidget):
         self._ecu_defs = []           # EcuDefinition列表
         self._online_set = set()      # 最近扫描在线的ECU名
         self._dtc_map = {}            # ECU名 -> DTC数量（已知时）
+        self._scan_failed = False     # 最近一次扫描异常（黄色警示）
+        self._scan_err_msg = ""      # 异常描述（悬浮/后续展示用）
         self._init_ui()
 
     def _init_ui(self):
@@ -173,6 +175,7 @@ class VehicleOverviewView(QWidget):
 
     def set_scan_results(self, results: list, ecu_defs: list, scan_time: str):
         """扫描结果表（§5 结果格式）: results为在线EcuDefinition列表"""
+        self._scan_failed = False  # 新结果作废异常警示
         found = {(e.tx_id, e.rx_id) for e in results}
         self._online_set = {d.name for d in ecu_defs
                             if (d.tx_id, d.rx_id) in found}
@@ -198,6 +201,14 @@ class VehicleOverviewView(QWidget):
 
     # ---------------- 内部 ----------------
 
+    def set_scan_failed(self, msg: str = ""):
+        """扫描异常: 拓扑全部节点黄色警示 + 通信异常卡计数，
+        区别于"扫描完成但离线"的灰色态"""
+        self._scan_failed = True
+        self._scan_err_msg = msg
+        self._rebuild_topo()
+        self._update_stats()
+
     def _rebuild_topo(self):
         self._topo_tree.clear()
         gw = QTreeWidgetItem(self._topo_tree, ["🌐 Gateway"])
@@ -205,17 +216,22 @@ class VehicleOverviewView(QWidget):
         for d in self._ecu_defs:
             online = d.name in self._online_set
             dtc = self._dtc_map.get(d.name)
-            if online and dtc:
+            if self._scan_failed:
+                # 扫描异常: 全部黄色警示（无法确认任何ECU状态）
+                dot, color = "▲", _COLOR_WARNING
+            elif online and dtc:
                 dot, color = "●", _COLOR_DTC
             elif online:
                 dot, color = "●", _COLOR_ONLINE
             elif self._online_set:
-                # 已扫描过但不在线 -> 灰色离线；扫描异常预留黄色
+                # 已扫描过但不在线 -> 灰色离线（扫描异常见上方黄色分支）
                 dot, color = "●", _COLOR_OFFLINE
             else:
                 dot, color = "○", _COLOR_OFFLINE
-            item = QTreeWidgetItem(
-                gw, [f"{dot} {d.name}  0x{d.tx_id:03X}/0x{d.rx_id:03X}"])
+            text = f"{dot} {d.name}  0x{d.tx_id:03X}/0x{d.rx_id:03X}"
+            if self._scan_failed:
+                text += "  扫描异常"
+            item = QTreeWidgetItem(gw, [text])
             item.setForeground(0, QColor(color))
             item.setData(0, Qt.ItemDataRole.UserRole, d)
         self._topo_tree.expandAll()
@@ -233,7 +249,11 @@ class VehicleOverviewView(QWidget):
         v_online.setText(str(online) if self._online_set else "--")
         v_offline.setText(str(total - online) if self._online_set else "--")
         v_dtc.setText(str(dtc_total) if self._dtc_map else "--")
-        v_comm.setText("0" if self._online_set else "--")
+        # 通信异常卡: 扫描异常时全部ECU计为异常（黄色警示）
+        if self._scan_failed:
+            v_comm.setText(str(total) if total else "异常")
+        else:
+            v_comm.setText("0" if self._online_set else "--")
 
     def _on_topo_double_clicked(self, item: QTreeWidgetItem, column: int):
         data = item.data(0, Qt.ItemDataRole.UserRole)

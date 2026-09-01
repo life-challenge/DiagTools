@@ -1,0 +1,38 @@
+/* DiagTools A2L 示例文件（演示 文件→导入→A2L 解析）
+ *
+ * 本文件遵循 ASAM MCD 2 MC 块语法的最小子集，
+ * 可被 src/business/a2l_parser.py 解析:
+ *   - /begin PROJECT / /begin MODULE 提取项目与模块名
+ *   - MEASUREMENT 块提取测量量（名称/描述/数据类型/ECU地址）
+ *   - CHARACTERISTIC 块提取标定量
+ */
+/begin PROJECT DemoProject
+  /begin MODULE DemoModule
+    /begin A2ML
+    /end A2ML
+
+    /begin MEASUREMENT
+      EngineSpeed "发动机转速" UWORD NO_COMPU_METHOD 0 0 8000
+      ECU_ADDRESS 0x80001000
+    /end MEASUREMENT
+
+    /begin MEASUREMENT
+      CoolantTemp "冷却液温度" SWORD NO_COMPU_METHOD 0 0 250
+      ECU_ADDRESS 0x80001004
+    /end MEASUREMENT
+
+    /begin MEASUREMENT
+      BatteryVoltage "蓄电池电压" FLOAT32_IEEE NO_COMPU_METHOD 0 0 20.0
+      ECU_ADDRESS 0x80001008
+    /end MEASUREMENT
+
+    /begin CHARACTERISTIC
+      IdleSpeedSetpoint "怠速目标转速" VALUE 0x80010000 UWORD 0 NO_COMPU_METHOD 0 8000
+    /end CHARACTERISTIC
+
+    /begin CHARACTERISTIC
+      FuelCutThreshold "断油转速阈值" VALUE 0x80010004 UWORD 0 NO_COMPU_METHOD 0 8000
+    /end CHARACTERISTIC
+
+  /end MODULE
+/end PROJECT

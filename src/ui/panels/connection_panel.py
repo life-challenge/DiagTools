@@ -134,16 +134,17 @@ class ConnectionPanel(QWidget):
         layout.addWidget(addr_group)
         self._addr_group = addr_group
 
-        # 连接按钮
+        # 连接按钮（与工具栏同一套黄/红配色与互补置灰规则，
+        # objectName 挂全局QSS；不再本地setStyleSheet，否则会覆盖主题样式）
         btn_layout = QHBoxLayout()
         self._connect_btn = QPushButton("连接")
-        self._connect_btn.setStyleSheet("QPushButton { padding: 8px; font-weight: bold; }")
+        self._connect_btn.setObjectName("btn_connect")
         self._connect_btn.clicked.connect(self._on_connect)
         btn_layout.addWidget(self._connect_btn)
 
         self._disconnect_btn = QPushButton("断开")
-        self._disconnect_btn.setEnabled(False)
-        self._disconnect_btn.setStyleSheet("QPushButton { padding: 8px; }")
+        self._disconnect_btn.setObjectName("btn_disconnect")
+        self._disconnect_btn.setEnabled(False)  # 未连接时置灰不可点（与连接钮互补）
         self._disconnect_btn.clicked.connect(self._on_disconnect)
         btn_layout.addWidget(self._disconnect_btn)
         layout.addLayout(btn_layout)

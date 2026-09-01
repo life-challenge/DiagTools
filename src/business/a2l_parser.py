@@ -80,6 +80,13 @@ class A2lParser:
     def parse_text(self, text: str):
         db = A2lDatabase()
 
+        # 剥离注释（A2L规范支持 /* */ 与 // ；先保护双引号字符串，
+        # 避免注释文本误入 PROJECT/MODULE 名等正则）
+        text = re.sub(
+            r'"[^"]*"|/\*.*?\*/|//[^\n]*',
+            lambda m: m.group(0) if m.group(0).startswith('"') else ' ',
+            text, flags=re.DOTALL)
+
         # PROJECT / MODULE 名（块开始后的首个非引号词）
         m = re.search(r"/begin\s+PROJECT\s+(\S+)", text)
         if m:
@@ -116,9 +123,19 @@ class A2lParser:
         if kind == "MEASUREMENT":
             # name "desc" datatype conversion display_id ecu_address ...
             data_type = toks[2] if len(toks) > 2 else ""
-            address = _parse_int(toks[5]) if len(toks) > 5 else 0
+            address = self._find_address(toks, fallback_idx=5)
             return A2lEntry(kind, name, desc, address, data_type)
         # CHARACTERISTIC: name "desc" type address deposit max_diff conversion ...
         data_type = toks[2] if len(toks) > 2 else ""
-        address = _parse_int(toks[3]) if len(toks) > 3 else 0
+        address = self._find_address(toks, fallback_idx=3)
         return A2lEntry(kind, name, desc, address, data_type)
+
+    @staticmethod
+    def _find_address(toks: list, fallback_idx: int) -> int:
+        """块内地址提取: 优先 ECU_ADDRESS 关键字后一个token
+        （真实A2L的IF_DATA场景），否则回退到固定位置参数"""
+        if "ECU_ADDRESS" in toks:
+            idx = toks.index("ECU_ADDRESS")
+            if idx + 1 < len(toks):
+                return _parse_int(toks[idx + 1])
+        return _parse_int(toks[fallback_idx]) if len(toks) > fallback_idx else 0

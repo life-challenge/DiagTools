@@ -15,7 +15,7 @@ import time
 import subprocess
 from PyQt6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QPushButton, QLabel,
-    QTabWidget, QPlainTextEdit, QFileDialog
+    QTabWidget, QPlainTextEdit, QFileDialog, QSplitter
 )
 from PyQt6.QtCore import Qt
 from PyQt6.QtGui import QColor, QTextCharFormat, QTextCursor
@@ -32,6 +32,9 @@ class LogDock(QWidget):
 
     TAB_BUSINESS, TAB_UDS, TAB_CAN = range(3)
 
+    # 展开态最小高度（防挤压到无法阅读）；折叠态收缩到头部一行
+    _MIN_HEIGHT = 170
+
     # 日志等级颜色（§7: INFO/SUCCESS/WARNING/ERROR/DEBUG）
     _LEVEL_COLORS = {
         "INFO": "#CDD6F4", "SUCCESS": "#4CAF50", "WARNING": "#FF9800",
@@ -41,6 +44,8 @@ class LogDock(QWidget):
     def __init__(self, parent=None):
         super().__init__(parent)
         self._collapsed = False
+        self._expanded_height = 0  # 折叠前的高度，展开时恢复
+        self.setMinimumHeight(self._MIN_HEIGHT)
         self._init_ui()
 
     def _init_ui(self):
@@ -49,9 +54,9 @@ class LogDock(QWidget):
         layout.setSpacing(0)
 
         # ---- 头部: 折叠开关 + 计数 + 操作（带底边框，与下方页签分隔） ----
-        header_widget = QWidget()
-        header_widget.setObjectName("dock_header")
-        header = QHBoxLayout(header_widget)
+        self._header_widget = QWidget()
+        self._header_widget.setObjectName("dock_header")
+        header = QHBoxLayout(self._header_widget)
         header.setContentsMargins(6, 3, 6, 3)
         header.setSpacing(6)
 
@@ -86,18 +91,21 @@ class LogDock(QWidget):
         clear_btn.setFixedWidth(50)
         clear_btn.clicked.connect(self._clear_active)
         header.addWidget(clear_btn)
+        self._clear_btn = clear_btn
 
         export_btn = QPushButton("导出")
         export_btn.setFixedWidth(50)
         export_btn.clicked.connect(self._export_active)
         header.addWidget(export_btn)
+        self._export_btn = export_btn
 
         folder_btn = QPushButton("📁 打开日志文件夹")
         folder_btn.setToolTip("在资源管理器中打开当前页签对应的日志目录")
         folder_btn.clicked.connect(self._open_log_folder)
         header.addWidget(folder_btn)
+        self._folder_btn = folder_btn
 
-        layout.addWidget(header_widget)
+        layout.addWidget(self._header_widget)
 
         # ---- 三层日志 ----
         self._tabs = QTabWidget()
@@ -171,9 +179,39 @@ class LogDock(QWidget):
         self.set_collapsed(not self._collapsed)
 
     def set_collapsed(self, collapsed: bool):
+        """折叠/展开
+
+        折叠态: 收缩为一条紧凑头部细条——路径/操作按钮隐藏
+        （对折叠面板无意义），高度收到头部一行，splitter 空间让给主区。
+        展开态: 恢复完整头部与最小阅读高度，并还原折叠前的高度。
+        """
+        if collapsed == self._collapsed:
+            self._toggle_btn.setText("▲" if collapsed else "▼")
+            return
         self._collapsed = collapsed
-        self._tabs.setVisible(not collapsed)
         self._toggle_btn.setText("▲" if collapsed else "▼")
+        self._tabs.setVisible(not collapsed)
+        if collapsed:
+            # 记录当前高度供展开时还原
+            self._expanded_height = max(self.height(), self._expanded_height)
+            for w in (self._path_label, self._clear_btn,
+                      self._export_btn, self._folder_btn):
+                w.hide()
+            self.setMinimumHeight(0)
+            self.setMaximumHeight(self._header_widget.sizeHint().height())
+        else:
+            for w in (self._path_label, self._clear_btn,
+                      self._export_btn, self._folder_btn):
+                w.show()
+            self.setMinimumHeight(self._MIN_HEIGHT)
+            self.setMaximumHeight(16777215)  # 恢复默认无上限
+            # 还原折叠前的高度（splitter 两侧重新分配）
+            sp = self.parent()
+            if isinstance(sp, QSplitter) and self._expanded_height > 0:
+                total = sum(sp.sizes())
+                if total > 0:
+                    sp.setSizes([max(total - self._expanded_height, 0),
+                                 self._expanded_height])
 
     @property
     def collapsed(self) -> bool:

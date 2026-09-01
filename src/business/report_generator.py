@@ -1,6 +1,6 @@
 """诊断报告生成模块
 
-支持生成DTC报告、DID快照报告、全车扫描报告。
+支持生成DTC报告、DID快照报告、全车扫描报告、刷写报告。
 格式: HTML（带样式）和纯文本。
 """
 
@@ -42,6 +42,60 @@ class ReportGenerator:
 
         self._generate_did_html(did_values, ecu_name, filepath)
         self._logger.info(f"DID报告已生成: {filepath}")
+        return filepath
+
+    def generate_flash_report(self, ecu_name: str, file_path: str,
+                              steps: list, result: str,
+                              error_msg: str = "",
+                              start_time: str = "",
+                              end_time: str = "") -> str:
+        """生成刷写报告（刷写终态时自动调用）
+
+        Args:
+            steps: 步骤文本列表（含状态标记，如"✔ 5. 数据传输"）
+            result: 刷写完成/刷写失败/已取消
+        """
+        timestamp = time.strftime("%Y%m%d_%H%M%S")
+        filepath = os.path.join(self._output_dir, f"flash_report_{timestamp}.html")
+
+        ok = result == "刷写完成"
+        result_color = "#4CAF50" if ok else "#F44336"
+        step_rows = "".join(
+            f"<tr><td>{s}</td></tr>" for s in steps)
+
+        html = f"""<!DOCTYPE html>
+<html><head><meta charset="utf-8"><title>刷写报告</title>
+<style>
+body {{ font-family: 'Microsoft YaHei', Arial, sans-serif; margin: 20px; background: #f5f5f5; }}
+.header {{ background: #1a237e; color: white; padding: 20px; border-radius: 8px; }}
+.summary {{ display: flex; gap: 20px; margin: 20px 0; }}
+.summary-card {{ background: white; padding: 15px; border-radius: 8px; box-shadow: 0 2px 4px rgba(0,0,0,0.1); flex: 1; text-align: center; }}
+.summary-card h3 {{ margin: 0; font-size: 1.6em; }}
+table {{ width: 100%; border-collapse: collapse; background: white; border-radius: 8px; overflow: hidden; box-shadow: 0 2px 4px rgba(0,0,0,0.1); }}
+th {{ background: #37474F; color: white; padding: 12px; text-align: left; }}
+td {{ padding: 8px 12px; border-bottom: 1px solid #eee; font-family: Consolas, monospace; }}
+</style></head><body>
+<div class="header">
+<h1>刷写报告</h1>
+<p>时间: {time.strftime("%Y-%m-%d %H:%M:%S")}</p>
+<p>ECU: {ecu_name}</p>
+</div>
+<div class="summary">
+<div class="summary-card"><p>结果</p><h3 style="color: {result_color};">{result}</h3></div>
+<div class="summary-card"><p>步骤数</p><h3>{len(steps)}</h3></div>
+<div class="summary-card"><p>开始</p><h3>{start_time or '--'}</h3></div>
+<div class="summary-card"><p>结束</p><h3>{end_time or '--'}</h3></div>
+</div>
+<p><b>刷写文件:</b> {file_path}</p>
+{"<p style='color:#F44336;'><b>错误:</b> " + error_msg + "</p>" if error_msg else ""}
+<table>
+<tr><th>执行步骤（含状态标记）</th></tr>
+{step_rows}
+</table></body></html>"""
+
+        with open(filepath, 'w', encoding='utf-8') as f:
+            f.write(html)
+        self._logger.info(f"刷写报告已生成: {filepath}")
         return filepath
 
     def _generate_dtc_html(self, records, ecu_name, filepath):

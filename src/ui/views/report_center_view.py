@@ -3,8 +3,8 @@
 统一报告入口:
   - 全车扫描报告
   - ECU诊断报告（DTC）
-  - 刷写报告（预留接口）
-格式: HTML / CSV / JSON（PDF后续）
+  - 刷写报告（刷写终态自动生成）
+格式: HTML / CSV / JSON / PDF（HTML→PDF 零依赖，QTextDocument+QPrinter）
 输出: <项目根>/reports/
 """
 
@@ -15,9 +15,11 @@ import time
 from PyQt6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel, QPushButton,
     QTableWidget, QTableWidgetItem, QHeaderView, QAbstractItemView,
-    QFileDialog
+    QFileDialog, QMessageBox
 )
 from PyQt6.QtCore import Qt
+from PyQt6.QtGui import QTextDocument, QPageSize
+from PyQt6.QtPrintSupport import QPrinter
 
 from src.utils.paths import get_project_root
 
@@ -53,7 +55,7 @@ class ReportCenterView(QWidget):
 
         hint = QLabel(
             "报告由 文件→导出→诊断报告 / 全车扫描 / 刷写流程 自动生成；"
-            "支持 HTML / CSV / JSON，PDF 后续增加。")
+            "支持 HTML / CSV / JSON，HTML报告可另存为PDF。")
         hint.setStyleSheet("color: #888;")
         hint.setWordWrap(True)
         layout.addWidget(hint)
@@ -74,6 +76,10 @@ class ReportCenterView(QWidget):
         # ---- 底部操作 ----
         bottom = QHBoxLayout()
         bottom.addStretch(1)
+        self._btn_pdf = QPushButton("导出为PDF")
+        self._btn_pdf.setToolTip("选中HTML报告后可另存为PDF（零依赖，支持中文）")
+        self._btn_pdf.clicked.connect(self._export_pdf)
+        bottom.addWidget(self._btn_pdf)
         self._btn_open = QPushButton("打开报告")
         self._btn_open.setObjectName("btn_primary")
         self._btn_open.clicked.connect(self._open_selected)
@@ -137,6 +143,37 @@ class ReportCenterView(QWidget):
         else:
             import subprocess
             subprocess.Popen(["xdg-open", path])
+
+    def _export_pdf(self):
+        """HTML报告→PDF: QTextDocument+QPrinter 零依赖渲染（支持中文）"""
+        path = self._selected_path()
+        if not path:
+            QMessageBox.information(self, "导出PDF", "请先选择一份报告")
+            return
+        if not path.lower().endswith(".html"):
+            QMessageBox.information(
+                self, "导出PDF", "仅HTML格式报告可转PDF（CSV/JSON请直接打开查看）")
+            return
+        try:
+            with open(path, "r", encoding="utf-8") as f:
+                html = f.read()
+        except OSError as e:
+            QMessageBox.warning(self, "导出PDF", f"报告读取失败: {e}")
+            return
+        default_name = os.path.splitext(os.path.basename(path))[0] + ".pdf"
+        target, _ = QFileDialog.getSaveFileName(
+            self, "导出PDF", os.path.join(self._report_dir, default_name),
+            "PDF文件 (*.pdf)")
+        if not target:
+            return
+        doc = QTextDocument()
+        doc.setHtml(html)
+        printer = QPrinter(QPrinter.PrinterMode.HighResolution)
+        printer.setOutputFormat(QPrinter.OutputFormat.PdfFormat)
+        printer.setOutputFileName(target)
+        printer.setPageSize(QPageSize(QPageSize.PageSizeId.A4))
+        doc.print(printer)
+        QMessageBox.information(self, "导出PDF", f"PDF已生成:\n{target}")
 
     def _open_report_dir(self):
         os.makedirs(self._report_dir, exist_ok=True)

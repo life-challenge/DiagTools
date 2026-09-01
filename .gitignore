@@ -14,9 +14,10 @@ logs/
 data_recordings/
 reports/
 
-# 导入功能导出的解析结果（运行时生成）
+# 导入功能导出的解析结果（运行时生成）；保留示例文件供新手体验
 resources/odx/
-resources/a2l/
+resources/a2l/*
+!resources/a2l/sample_demo.a2l
 
 # 用户项目文件（含个人设备配置）
 *.dproj

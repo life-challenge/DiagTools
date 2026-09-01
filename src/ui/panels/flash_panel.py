@@ -16,6 +16,8 @@
 并回填目标地址/驱动地址；.bin 无地址信息需手动填写。
 """
 
+import os
+import time
 from PyQt6.QtWidgets import (QWidget, QVBoxLayout, QHBoxLayout, QGroupBox,
                               QLabel, QPushButton, QLineEdit, QSpinBox,
                               QProgressBar, QTextEdit, QFileDialog, QCheckBox,
@@ -56,6 +58,8 @@ class FlashPanel(QWidget):
         self._current_step = -1
         self._parsed_path = ""         # 最近解析成功的文件路径
         self._parsed_span = 0          # 该文件的地址跨度（擦除大小候选）
+        self._flash_start_ts = 0.0     # 本次刷写开始时间（报告用）
+        self._flash_file_path = ""     # 本次刷写文件（报告用）
         self._init_ui()
         self._rebuild_steps()
 
@@ -567,6 +571,10 @@ class FlashPanel(QWidget):
             progress_cb=self._on_progress,
             state_cb=self._on_state_changed)
 
+        # 刷写报告所需的起止信息（终态时自动生成）
+        self._flash_start_ts = time.time()
+        self._flash_file_path = config.file_path
+
         # 以开始刷写时的配置锁定步骤列表
         self._rebuild_steps()
         self._start_btn.setEnabled(False)
@@ -646,6 +654,26 @@ class FlashPanel(QWidget):
             self._log(f"刷写结束: {state_names.get(state, '未知')}")
             if error_msg:
                 self._log(f"错误: {error_msg}")
+            # 刷写终态自动生成报告到项目reports/（报告中心可识别）
+            self._save_flash_report(state_names.get(state, "未知"), error_msg)
+
+    def _save_flash_report(self, result: str, error_msg: str):
+        """刷写结束后自动生成HTML报告（异常不影响主流程）"""
+        try:
+            from src.business.report_generator import ReportGenerator
+            from src.utils.paths import get_project_root
+            steps = [item.text(0) for item in self._step_items]
+            start_text = (time.strftime("%H:%M:%S", time.localtime(self._flash_start_ts))
+                          if self._flash_start_ts else "")
+            gen = ReportGenerator(os.path.join(get_project_root(), "reports"))
+            path = gen.generate_flash_report(
+                self._ecu_name, self._flash_file_path, steps, result,
+                error_msg=error_msg or "",
+                start_time=start_text,
+                end_time=time.strftime("%H:%M:%S"))
+            self._log(f"刷写报告已生成: {path}")
+        except Exception as e:
+            self._log(f"刷写报告生成失败(不影响刷写结果): {e}")
 
     def _log(self, msg: str):
         import time

@@ -1,0 +1,22 @@
+{
+  "flash": {
+    "target_address": "0x80000000",
+    "block_size": 1024,
+    "security_level": 0,
+    "erase_block_size": "0x1000",
+    "enter_programming": true,
+    "prep_ext_session": true,
+    "preprog_check": true,
+    "dtc_off": true,
+    "comm_disable": true,
+    "write_fingerprint": false,
+    "check_integrity": true,
+    "post_ext_session": true,
+    "post_comm_enable": true,
+    "post_dtc_on": true,
+    "post_default_session": true,
+    "post_clear_dtc": true,
+    "reset_after_flash": true
+  },
+  "_comment": "刷写配置示例: 文件→导入→Flash配置 可加载本文件回填刷写中心参数；字段集与 FlashPanel.import_config 一致（target_address 为APP目标地址，hex 字段支持 0x 前缀字符串）"
+}

@@ -161,22 +161,43 @@ QPushButton:disabled {
     border-color: #313244;
 }
 
+/* 工具栏启动/停止对: 连接=亮黄色▶可点，点击(运行中)后置灰不可再点；
+   断开=红色■，未连接时灰色禁用，连接后可点（与连接钮互补） */
 QPushButton#btn_connect {
-    background-color: #2E7D32;
-    border-color: #4CAF50;
+    background-color: #FFC107;
+    border: 1px solid #FFD54F;
+    color: #1A1A1A;
+    font-weight: bold;
 }
 
 QPushButton#btn_connect:hover {
-    background-color: #388E3C;
+    background-color: #FFD54F;
+}
+
+/* 已连接时置灰（ID选择器特异性高于通用:disabled，须显式覆盖） */
+QPushButton#btn_connect:disabled {
+    background-color: #181825;
+    color: #585B70;
+    border-color: #313244;
 }
 
 QPushButton#btn_disconnect {
     background-color: #C62828;
     border-color: #F44336;
+    color: #FFFFFF;
+    font-weight: bold;
 }
 
 QPushButton#btn_disconnect:hover {
     background-color: #D32F2F;
+}
+
+/* 未连接时置灰不可点（ID选择器特异性高于通用:disabled，须显式覆盖，
+   否则禁用态仍渲染为红色、看似可点击） */
+QPushButton#btn_disconnect:disabled {
+    background-color: #181825;
+    color: #585B70;
+    border-color: #313244;
 }
 
 /* 按钮层级（§9: Primary/Secondary/Danger） */
@@ -634,6 +655,44 @@ QPushButton#btn_danger {
     background-color: #C62828;
     border-color: #F44336;
     color: #FFFFFF;
+}
+
+/* 工具栏启动/停止对: 连接亮黄/断开红色 */
+QPushButton#btn_connect {
+    background-color: #FFC107;
+    border: 1px solid #FFD54F;
+    color: #1A1A1A;
+    font-weight: bold;
+}
+
+QPushButton#btn_connect:hover {
+    background-color: #FFD54F;
+}
+
+/* 已连接时置灰（ID选择器特异性高于通用:disabled，须显式覆盖） */
+QPushButton#btn_connect:disabled {
+    background-color: #E0E0E0;
+    color: #9E9E9E;
+    border-color: #BDBDBD;
+}
+
+QPushButton#btn_disconnect {
+    background-color: #C62828;
+    border-color: #F44336;
+    color: #FFFFFF;
+    font-weight: bold;
+}
+
+QPushButton#btn_disconnect:hover {
+    background-color: #D32F2F;
+}
+
+/* 未连接时置灰不可点（ID选择器特异性高于通用:disabled，须显式覆盖，
+   否则禁用态仍渲染为红色、看似可点击） */
+QPushButton#btn_disconnect:disabled {
+    background-color: #E0E0E0;
+    color: #9E9E9E;
+    border-color: #BDBDBD;
 }
 
 QLabel#online_badge {
