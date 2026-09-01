@@ -178,6 +178,11 @@ class MainWindow(QMainWindow):
         self._log_dock = LogDock()
         # ECU诊断子面板日志统一汇入底部业务日志（面板已不内置日志窗口）
         self._diag_view.business_log.connect(self._log_dock.log_business)
+        # 测试中心执行期间暂停会话保活: 避免3E帧与协议一致性用例收发交错干扰
+        self._test_view.tests_started.connect(
+            self._diag_view.session_panel.pause_keepalive)
+        self._test_view.tests_finished.connect(
+            self._diag_view.session_panel.resume_keepalive)
         # 日志面板最小高度由LogDock自管（展开170防挤压/折叠收缩到头部一行）
         self._v_splitter.addWidget(self._log_dock)
         self._v_splitter.setStretchFactor(0, 1)

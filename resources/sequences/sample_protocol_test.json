@@ -1,0 +1,58 @@
+{
+  "name": "协议一致性示例",
+  "description": "演示 expected_nrc / expect_no_response / expected_response 三种校验模式（测试中心加载后可直接运行）",
+  "loop_count": 1,
+  "loop_delay_ms": 0,
+  "stop_on_error": false,
+  "auto_tester_present": false,
+  "steps": [
+    {
+      "name": "正响应前缀校验: 读VIN",
+      "request": "22 F1 90",
+      "send_count": 1,
+      "expected_response": "62 F1 90",
+      "check_positive": true,
+      "delay_before_ms": 0,
+      "delay_after_ms": 100,
+      "enabled": true,
+      "expected_nrc": null,
+      "expect_no_response": false
+    },
+    {
+      "name": "期望负响应: 无效DID应回NRC 0x31",
+      "request": "22 00 00",
+      "send_count": 1,
+      "expected_response": null,
+      "check_positive": true,
+      "delay_before_ms": 0,
+      "delay_after_ms": 100,
+      "enabled": true,
+      "expected_nrc": [49, 34],
+      "expect_no_response": false
+    },
+    {
+      "name": "期望无响应: 3E 80 抑制正响应",
+      "request": "3E 80",
+      "send_count": 1,
+      "expected_response": null,
+      "check_positive": true,
+      "delay_before_ms": 0,
+      "delay_after_ms": 100,
+      "enabled": true,
+      "expected_nrc": null,
+      "expect_no_response": true
+    },
+    {
+      "name": "期望负响应: 未支持服务应回NRC 0x11",
+      "request": "AA",
+      "send_count": 1,
+      "expected_response": null,
+      "check_positive": true,
+      "delay_before_ms": 0,
+      "delay_after_ms": 0,
+      "enabled": true,
+      "expected_nrc": [17],
+      "expect_no_response": false
+    }
+  ]
+}

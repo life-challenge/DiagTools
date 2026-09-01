@@ -3,6 +3,24 @@
 本文件记录 DiagTools 各版本的重要变更，格式遵循
 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)。
 
+## [1.7.0] - 2026-09-01
+
+### 新增
+- **测试中心 UDS 协议一致性用例库**（参 ISO 14229-1 / Vector Diva TestModule 分组，共26个）:
+  - GB 通用行为: 未支持服务NRC 0x11、长度错误NRC 0x13、TesterPresent正响应/
+    抑制响应无回复、非法子功能NRC 0x12
+  - SC 会话控制: 默认→编程→扩展会话切换循环、非法/未支持子功能、长度错误
+  - SA 安全访问: 默认会话受限NRC 0x7F、扩展会话种子请求、非法安全等级、长度错误（会话类用例末步自动还原默认会话）
+  - DT DTC服务: 按状态掩码读、非法子功能/长度、DTC设置控制、清除全部（破坏性标注）
+  - DD 数据标识: 有效/无效DID读写（无效DID测试不污染ECU数据）、长度错误
+  - RC 例程控制: 无效例程ID、非法子功能、长度错误
+- **序列引擎四种校验模式**: 期望响应前缀 / 期望负响应NRC列表（任一命中）/
+  期望无响应（3E 80抑制场景）/ 默认正响应；JSON字段 expected_nrc、expect_no_response
+- **测试执行期间自动暂停会话保活**（tests_started/finished信号接线），
+  避免3E帧与用例收发交错干扰；失败详情附NRC可读名（ISO 14229-1 Table A.1）
+- **示例序列** resources/sequences/sample_protocol_test.json（演示三种新校验模式）
+- 测试中心"加载测试序列"对话框支持加载上述示例直接运行
+
 ## [1.6.0] - 2026-09-01
 
 ### 新增
