@@ -56,6 +56,16 @@ def _seq(name: str, desc: str, stop_on_error: bool = True) -> UdsSequence:
     return s
 
 
+def _pre_ext_session() -> SequenceStep:
+    """前置条件: 进入扩展会话（部分服务在非默认会话才支持，如27/2E/85）"""
+    return _step("进入扩展会话", "10 03", exp_hex="50 03")
+
+
+def _post_default_session() -> SequenceStep:
+    """清理: 还原默认会话（用例后总执行，失败仅警告）"""
+    return _step("还原默认会话", "10 01", exp_hex="50 01")
+
+
 def _builtin_cases() -> list:
     """内置标准测试用例（基础冒烟，均为标准服务）"""
     cases = []
@@ -147,16 +157,16 @@ def _conformance_cases() -> list:
     seq.steps.append(_step("默认会话请种子", "27 01", nrc=[0x7F]))
     cases.append(seq)
 
-    seq = _seq("SA-02 扩展会话种子请求", "扩展会话下27 01应回67 01+种子", stop_on_error=False)
-    seq.steps.append(_step("进入扩展会话", "10 03", exp_hex="50 03"))
+    seq = _seq("SA-02 扩展会话种子请求", "前置扩展会话，27 01应回67 01+种子")
+    seq.pre_steps.append(_pre_ext_session())
     seq.steps.append(_step("请求种子", "27 01", exp_hex="67 01", delay_before=200))
-    seq.steps.append(_step("还原默认会话", "10 01", exp_hex="50 01", delay_before=200))
+    seq.post_steps.append(_post_default_session())
     cases.append(seq)
 
-    seq = _seq("SA-03 非法安全等级", "27 10 应回NRC 0x12（实现差异时容忍0x31）", stop_on_error=False)
-    seq.steps.append(_step("进入扩展会话", "10 03", exp_hex="50 03"))
+    seq = _seq("SA-03 非法安全等级", "27 10 应回NRC 0x12（实现差异时容忍0x31）")
+    seq.pre_steps.append(_pre_ext_session())
     seq.steps.append(_step("非法等级", "27 10", nrc=[0x12, 0x31], delay_before=200))
-    seq.steps.append(_step("还原默认会话", "10 01", exp_hex="50 01", delay_before=200))
+    seq.post_steps.append(_post_default_session())
     cases.append(seq)
 
     seq = _seq("SA-04 安全长度错误", "仅发27应回NRC 0x13")
@@ -176,13 +186,17 @@ def _conformance_cases() -> list:
     seq.steps.append(_step("缺状态掩码", "19 02", nrc=[0x13]))
     cases.append(seq)
 
-    seq = _seq("DT-04 DTC设置控制", "85 02关→正响应C5 02；85 01开→C5 01")
-    seq.steps.append(_step("关闭DTC设置", "85 02", exp_hex="C5 02"))
+    seq = _seq("DT-04 DTC设置控制", "前置扩展会话（部分ECU默认会话回NRC 0x7F）: 85 02关→C5 02；85 01开→C5 01")
+    seq.pre_steps.append(_pre_ext_session())
+    seq.steps.append(_step("关闭DTC设置", "85 02", exp_hex="C5 02", delay_before=200))
     seq.steps.append(_step("开启DTC设置", "85 01", exp_hex="C5 01", delay_before=200))
+    seq.post_steps.append(_post_default_session())
     cases.append(seq)
 
-    seq = _seq("DT-05 清除全部DTC", "⚠破坏性: 14 FF FF FF 清除所有故障码，应回54")
-    seq.steps.append(_step("ClearDTC", "14 FF FF FF", exp_hex="54"))
+    seq = _seq("DT-05 清除全部DTC", "⚠破坏性: 前置扩展会话, 14 FF FF FF 清除所有故障码，应回54")
+    seq.pre_steps.append(_pre_ext_session())
+    seq.steps.append(_step("ClearDTC", "14 FF FF FF", exp_hex="54", delay_before=200))
+    seq.post_steps.append(_post_default_session())
     cases.append(seq)
 
     # ---- DD: ReadDataByIdentifier / WriteDataByIdentifier ----
@@ -198,8 +212,10 @@ def _conformance_cases() -> list:
     seq.steps.append(_step("DID不完整", "22 F1", nrc=[0x13]))
     cases.append(seq)
 
-    seq = _seq("DD-04 写无效DID", "2E 00 00 写入无效DID应回NRC（不污染ECU数据）")
-    seq.steps.append(_step("写无效DID", "2E 00 00 AA", nrc=[0x31, 0x22, 0x33]))
+    seq = _seq("DD-04 写无效DID", "前置扩展会话（部分ECU默认会话不支持27/2E）, 写入无效DID应回NRC（不污染ECU数据）")
+    seq.pre_steps.append(_pre_ext_session())
+    seq.steps.append(_step("写无效DID", "2E 00 00 AA", nrc=[0x31, 0x22, 0x33], delay_before=200))
+    seq.post_steps.append(_post_default_session())
     cases.append(seq)
 
     seq = _seq("DD-05 2E长度错误", "2E 00 缺数据应回NRC 0x13")
@@ -236,6 +252,9 @@ class TestCenterView(QWidget):
         self._cases: list = _builtin_cases() + _conformance_cases()
         self._worker = None
         self._worker_thread = None
+        # 最近一次执行结果 {表格行: (seq, SequenceResult, 耗时秒)}
+        # 导出报告时据此输出每步 TX/RX 报文明细（而非仅步骤数）
+        self._last_results: dict = {}
         self._init_ui()
         self._refresh_table()
 
@@ -366,6 +385,7 @@ class TestCenterView(QWidget):
             try:
                 passed = 0
                 for row, seq, result, elapsed in results:
+                    self._last_results[row] = (seq, result, elapsed)
                     ok = result.success
                     passed += int(ok)
                     self._table.item(row, 3).setText("通过" if ok else "失败")
@@ -374,20 +394,23 @@ class TestCenterView(QWidget):
                     self._table.item(row, 4).setText(f"{elapsed*1000:.0f} ms")
                     detail = ""
                     if not ok and result.failed_step_name:
-                        detail = f"步骤{result.failed_step}: {result.failed_step_name}"
-                        # 附带失败步骤的校验错误（含NRC可读名）
-                        if result.failed_step is not None \
-                                and result.failed_step < len(result.step_results):
-                            err = result.step_results[result.failed_step].error_message
-                            if err:
-                                nrc_txt = ""
-                                if err.startswith("NRC: "):
-                                    try:
-                                        code = int(err[5:], 16)
-                                        nrc_txt = f" {_NRC_NAMES.get(code, '')}"
-                                    except ValueError:
-                                        pass
-                                detail += f" | {err}{nrc_txt}"
+                        detail = f"{result.failed_step_name}"
+                        # 附带失败步骤的校验错误（含NRC可读名）:
+                        # 按阶段定位首个失败步骤（前置步骤存在时索引不对位）
+                        failed_sr = next(
+                            (sr for sr in result.step_results
+                             if not sr.is_positive
+                             and sr.phase in ("前置条件", "主步骤")), None)
+                        if failed_sr is not None and failed_sr.error_message:
+                            err = failed_sr.error_message
+                            nrc_txt = ""
+                            if err.startswith("NRC: "):
+                                try:
+                                    code = int(err[5:], 16)
+                                    nrc_txt = f" {_NRC_NAMES.get(code, '')}"
+                                except ValueError:
+                                    pass
+                            detail += f" | {err}{nrc_txt}"
                     self._table.item(row, 5).setText(detail)
                     self._log(f"[{seq.name}] {'通过' if ok else '失败'} ({elapsed*1000:.0f} ms)")
                 self._log(f"测试完成: {passed}/{len(results)} 通过")
@@ -410,6 +433,8 @@ class TestCenterView(QWidget):
     # ---------------- 报告 ----------------
 
     def _export_report(self):
+        """导出测试报告CSV: 有执行结果时输出每步TX/RX报文明细，
+        未运行过则退化为表格摘要导出"""
         report_dir = os.path.join(get_project_root(), "reports")
         os.makedirs(report_dir, exist_ok=True)
         default_name = f"test_report_{time.strftime('%Y%m%d_%H%M%S')}.csv"
@@ -421,11 +446,34 @@ class TestCenterView(QWidget):
         import csv
         with open(filepath, "w", newline="", encoding="utf-8-sig") as f:
             writer = csv.writer(f)
-            writer.writerow(["用例", "描述", "步骤数", "结果", "耗时", "失败详情"])
-            for row in range(self._table.rowCount()):
+            if self._last_results:
+                # 步骤级明细报告: 每行一步，含请求/响应报文
                 writer.writerow([
-                    self._table.item(row, c).text()
-                    if self._table.item(row, c) else "" for c in range(6)])
+                    "用例", "用例描述", "用例结果", "用例耗时(ms)",
+                    "步骤阶段", "步骤序号", "步骤名称",
+                    "请求报文(TX)", "响应报文(RX)",
+                    "步骤结果", "步骤耗时(ms)", "错误信息"])
+                for row in sorted(self._last_results):
+                    seq, result, elapsed = self._last_results[row]
+                    case_ok = "通过" if result.success else "失败"
+                    for sr in result.step_results:
+                        writer.writerow([
+                            seq.name, seq.description, case_ok,
+                            f"{elapsed*1000:.0f}",
+                            sr.phase, sr.step_index + 1, sr.step_name,
+                            sr.request_sent.hex(" ").upper(),
+                            (sr.response_received.hex(" ").upper()
+                             if sr.response_received else "无响应"),
+                            "通过" if sr.is_positive else "失败",
+                            f"{sr.elapsed_ms:.0f}",
+                            sr.error_message])
+            else:
+                # 未运行过: 退化为当前表格摘要导出
+                writer.writerow(["用例", "描述", "步骤数", "结果", "耗时", "失败详情"])
+                for row in range(self._table.rowCount()):
+                    writer.writerow([
+                        self._table.item(row, c).text()
+                        if self._table.item(row, c) else "" for c in range(6)])
         self._log(f"测试报告已导出: {filepath}")
 
     def _log(self, msg: str):

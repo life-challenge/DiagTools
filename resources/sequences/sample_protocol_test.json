@@ -1,10 +1,24 @@
 {
   "name": "协议一致性示例",
-  "description": "演示 expected_nrc / expect_no_response / expected_response 三种校验模式（测试中心加载后可直接运行）",
+  "description": "演示 pre_steps 前置条件 / post_steps 清理 / expected_nrc / expect_no_response / expected_response（测试中心加载后可直接运行）",
   "loop_count": 1,
   "loop_delay_ms": 0,
-  "stop_on_error": false,
+  "stop_on_error": true,
   "auto_tester_present": false,
+  "pre_steps": [
+    {
+      "name": "前置: 进入扩展会话",
+      "request": "10 03",
+      "send_count": 1,
+      "expected_response": "50 03",
+      "check_positive": true,
+      "delay_before_ms": 0,
+      "delay_after_ms": 100,
+      "enabled": true,
+      "expected_nrc": null,
+      "expect_no_response": false
+    }
+  ],
   "steps": [
     {
       "name": "正响应前缀校验: 读VIN",
@@ -52,6 +66,20 @@
       "delay_after_ms": 0,
       "enabled": true,
       "expected_nrc": [17],
+      "expect_no_response": false
+    }
+  ],
+  "post_steps": [
+    {
+      "name": "清理: 还原默认会话",
+      "request": "10 01",
+      "send_count": 1,
+      "expected_response": "50 01",
+      "check_positive": true,
+      "delay_before_ms": 0,
+      "delay_after_ms": 0,
+      "enabled": true,
+      "expected_nrc": null,
       "expect_no_response": false
     }
   ]
