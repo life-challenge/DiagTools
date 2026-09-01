@@ -2,11 +2,11 @@
 
 from PyQt6.QtWidgets import (QWidget, QVBoxLayout, QHBoxLayout, QGroupBox,
                               QLabel, QPushButton, QTableWidget, QTableWidgetItem,
-                              QHeaderView, QLineEdit, QTextEdit, QSpinBox,
+                              QHeaderView, QLineEdit, QSpinBox,
                               QCheckBox, QFileDialog, QComboBox, QFormLayout,
-                              QProgressBar, QAbstractItemView)
-from PyQt6.QtCore import Qt, QThread
-from PyQt6.QtGui import QColor, QMouseEvent
+                              QProgressBar, QAbstractItemView, QApplication)
+from PyQt6.QtCore import Qt, QThread, pyqtSignal
+from PyQt6.QtGui import QColor, QMouseEvent, QFont
 from src.business.sequence_manager import SequenceManager, UdsSequence, SequenceStep, SequenceResult
 import threading
 
@@ -20,16 +20,26 @@ class StepTable(QTableWidget):
     def __init__(self, parent=None):
         super().__init__(parent)
         self._drag_row = -1
+        self._drag_moved = False   # 本次按住期间是否实际发生过行搬移
+        self._press_pos = None
         self._move_handler = None  # callable(src, dst)，由面板设置
 
     def mousePressEvent(self, e: QMouseEvent):
         super().mousePressEvent(e)
         if e.button() == Qt.MouseButton.LeftButton:
             self._drag_row = self.rowAt(e.position().toPoint().y())
+            self._press_pos = e.position()
+            self._drag_moved = False
 
     def mouseMoveEvent(self, e: QMouseEvent):
         # 只有先按住过某一行才启动拖动，避免空表格拖动异常
         if self._drag_row >= 0:
+            # 超过系统拖拽阈值才视为行排序拖拽——
+            # 避免点击/双击编辑单元格时的轻微抖动误触发整行重排
+            if (self._press_pos is not None and
+                    (e.position() - self._press_pos).manhattanLength()
+                    < QApplication.startDragDistance()):
+                return
             y = e.position().toPoint().y()
             target = self.rowAt(y)
             if target < 0:
@@ -37,19 +47,25 @@ class StepTable(QTableWidget):
                 target = (self.rowCount() - 1) if y > self.rowViewportPosition(self._drag_row) else 0
             if 0 <= target < self.rowCount() and target != self._drag_row:
                 self._move_row(self._drag_row, target)
+                self._drag_moved = True
         else:
             super().mouseMoveEvent(e)
 
     def mouseReleaseEvent(self, e: QMouseEvent):
-        if self._drag_row >= 0:
+        # 仅在真正发生过拖拽搬移后才整行选中并定位到名称列；
+        # 普通点击交给基类处理——否则每次单击松开都会把当前单元格
+        # 强制跳到名称列（点击请求HEX后焦点"跳走"的根因）
+        if self._drag_row >= 0 and self._drag_moved:
             row = self.rowAt(e.position().toPoint().y())
             if row < 0:
                 row = self._drag_row
             self._drag_row = -1
+            self._drag_moved = False
             self.selectRow(row)
             self.setCurrentCell(row, 1)
             self.setFocus()
         else:
+            self._drag_row = -1
             super().mouseReleaseEvent(e)
 
     def set_move_handler(self, handler):
@@ -65,6 +81,10 @@ class StepTable(QTableWidget):
 
 class SequencePanel(QWidget):
     """自定义序列面板"""
+
+    # 业务日志转发(msg, level): 面板不再内置日志窗口，统一由主窗口业务日志呈现。
+    # 注: 执行回调在后台线程发射，信号自动队列投递到GUI线程，线程安全
+    business_log = pyqtSignal(str, str)
 
     def __init__(self, uds_client=None, parent=None):
         super().__init__(parent)
@@ -150,7 +170,14 @@ class SequencePanel(QWidget):
         self._table.setHorizontalHeaderLabels(
             ["启用", "步骤名称", "请求HEX", "发送次数", "前延时(ms)", "后延时(ms)", "检查正响应", "结果"])
         header = self._table.horizontalHeader()
-        header.setSectionResizeMode(1, QHeaderView.ResizeMode.Stretch)
+        # 列宽策略: 步骤名称定宽（不再Stretch独占整行——否则请求HEX被挤窄，
+        # 点击高概率误中名称列），请求HEX作为主编辑列给足宽度，结果列弹性拉伸
+        for col, w in ((0, 50), (1, 110), (2, 210),
+                       (3, 76), (4, 92), (5, 92), (6, 92)):
+            self._table.setColumnWidth(col, w)
+        header.setSectionResizeMode(7, QHeaderView.ResizeMode.Stretch)
+        # 加高默认行，便于精确点击与双击编辑
+        self._table.verticalHeader().setDefaultSectionSize(30)
         self._table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
         layout.addWidget(self._table)
 
@@ -177,11 +204,7 @@ class SequencePanel(QWidget):
         btn_layout.addWidget(self._stop_btn)
         layout.addLayout(btn_layout)
 
-        # 执行日志
-        self._log_text = QTextEdit()
-        self._log_text.setReadOnly(True)
-        self._log_text.setMaximumHeight(120)
-        layout.addWidget(self._log_text)
+        layout.addStretch()
 
     def _add_step(self):
         row = self._table.rowCount()
@@ -194,7 +217,10 @@ class SequencePanel(QWidget):
         cb.setChecked(data.get("enabled", True))
         self._table.setCellWidget(row, 0, cb)
         self._table.setItem(row, 1, QTableWidgetItem(data.get("name", "")))
-        self._table.setItem(row, 2, QTableWidgetItem(data.get("request", "")))
+        hex_item = QTableWidgetItem(data.get("request", ""))
+        hex_item.setFont(QFont("Consolas"))
+        hex_item.setToolTip("双击编辑请求HEX，如: 22 F1 90")
+        self._table.setItem(row, 2, hex_item)
 
         count_spin = QSpinBox()
         count_spin.setRange(1, 999)
@@ -384,7 +410,5 @@ class SequencePanel(QWidget):
         self._seq_manager.stop_execution()
         self._log("正在停止...")
 
-    def _log(self, msg: str):
-        import time
-        ts = time.strftime("%H:%M:%S")
-        self._log_text.append(f"[{ts}] {msg}")
+    def _log(self, msg: str, level: str = "INFO"):
+        self.business_log.emit(msg, level)

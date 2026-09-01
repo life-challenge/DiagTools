@@ -3,22 +3,31 @@
 import os
 from PyQt6.QtWidgets import (QWidget, QVBoxLayout, QHBoxLayout, QGroupBox,
                               QLabel, QPushButton, QTableWidget, QTableWidgetItem,
-                              QHeaderView, QLineEdit, QComboBox, QTextEdit,
+                              QHeaderView, QLineEdit, QComboBox,
                               QFileDialog, QCheckBox, QSpinBox, QGridLayout)
-from PyQt6.QtCore import Qt, QTimer
+from PyQt6.QtCore import Qt, QTimer, QThread, pyqtSignal
 from PyQt6.QtGui import QColor, QFont
 from src.business.did_manager import DidManager, DidDefinition
+from src.ui.async_uds import UdsWorker
 from src.utils.paths import get_resource_path
 
 
 class DidPanel(QWidget):
     """DID读取/写入面板"""
 
+    # 业务日志转发(msg, level): 面板不再内置日志窗口，统一由主窗口业务日志呈现
+    business_log = pyqtSignal(str, str)
+
     def __init__(self, uds_client=None, parent=None):
         super().__init__(parent)
         self._uds_client = uds_client
         self._did_manager = DidManager()
         self._poll_timer = None
+        # 后台任务队列: UDS读写必须在后台线程执行，真实总线上等ECU响应
+        # 可达数秒，同步调用会冻结整个界面（表现为"点击无反应"）
+        self._queue = []          # 待处理任务 [(kind, did_id, arg), ...]
+        self._worker = None       # 保持引用防GC（见async_uds.UdsWorker说明）
+        self._thread = None
         self._init_ui()
 
     def set_uds_client(self, client):
@@ -126,11 +135,7 @@ class DidPanel(QWidget):
         manual_group.setLayout(manual_layout)
         layout.addWidget(manual_group)
 
-        # 日志
-        self._log_text = QTextEdit()
-        self._log_text.setReadOnly(True)
-        self._log_text.setMaximumHeight(120)
-        layout.addWidget(self._log_text)
+        layout.addStretch()
 
     def _load_definitions(self):
         start_dir = get_resource_path("did_definitions")
@@ -182,9 +187,8 @@ class DidPanel(QWidget):
         self._do_read_did(did_id)
 
     def _read_all(self):
-        for did_id in self._did_manager.definitions:
+        for did_id in list(self._did_manager.definitions):
             self._do_read_did(did_id)
-        self._refresh_table()
 
     def _do_read_did(self, did_id: int, show_detail: bool = False):
         if not self._uds_client:
@@ -192,17 +196,98 @@ class DidPanel(QWidget):
             if show_detail:
                 self._show_detail(did_id, None, None, "未连接")
             return
-        resp = self._uds_client.read_data_by_identifier(did_id)
-        if resp and len(resp) >= 3 and resp[0] == 0x62:
-            raw_data = resp[3:]
-            val = self._did_manager.update_value(did_id, raw_data)
-            self._log(f"读取 0x{did_id:04X}: {val.display_value}")
-            if show_detail:
-                self._show_detail(did_id, resp, resp, self._decode_payload(raw_data))
+        self._queue.append(("read", did_id, show_detail))
+        self._pump_queue()
+
+    def _do_write_did(self, did_id: int, data: bytes):
+        if not self._uds_client:
+            self._log("未连接UDS客户端")
+            return
+        self._queue.append(("write", did_id, data))
+        self._pump_queue()
+
+    # ---------------- 后台任务队列 ----------------
+
+    def _pump_queue(self):
+        """取出队首任务，在后台线程执行阻塞式UDS调用"""
+        if self._thread is not None or not self._queue:
+            return
+        kind, did_id, arg = self._queue.pop(0)
+        client = self._uds_client
+        if client is None:  # 队列执行中断开连接
+            self._log(f"操作 0x{did_id:04X} 取消: 已断开连接")
+            QTimer.singleShot(0, self._pump_queue)
+            return
+        if kind == "read":
+            func, args = client.read_data_by_identifier, (did_id,)
         else:
-            self._log(f"读取 0x{did_id:04X} 失败")
-            if show_detail:
-                self._show_detail(did_id, resp, None, "读取失败")
+            func, args = client.write_data_by_identifier, (did_id, arg)
+        worker = UdsWorker(func, *args)
+        thread = QThread(self)
+        worker.moveToThread(thread)
+        task = (kind, did_id, arg)
+        worker.finished.connect(
+            lambda resp, t=task: self._on_task_done(t, resp))
+        worker.error.connect(
+            lambda msg, t=task: self._on_task_error(t, msg))
+        worker.finished.connect(thread.quit)
+        worker.error.connect(thread.quit)
+        thread.started.connect(worker.run)
+        thread.finished.connect(self._on_thread_finished)
+        self._worker = worker
+        self._thread = thread
+        thread.start()
+
+    def _on_thread_finished(self):
+        self._worker = None
+        self._thread = None
+        self._pump_queue()  # 继续处理队列中剩余任务
+
+    def _on_task_done(self, task, resp):
+        """后台读写完成（GUI线程回调）: 更新表格/手动操作区/日志"""
+        kind, did_id, arg = task
+        if kind == "read":
+            if resp and len(resp) >= 3 and resp[0] == 0x62:
+                raw_data = resp[3:]
+                val = self._did_manager.update_value(did_id, raw_data)
+                self._log(f"读取 0x{did_id:04X}: {val.display_value}",
+                          "SUCCESS")
+                if arg:
+                    self._show_detail(did_id, resp, resp,
+                                       self._decode_payload(raw_data))
+                self._refresh_table()
+            else:
+                detail = self._describe_bad_resp(resp)
+                self._log(f"读取 0x{did_id:04X} 失败: {detail}", "ERROR")
+                if arg:
+                    self._show_detail(did_id, resp, None, detail)
+        else:
+            data = arg
+            ok = bool(resp and resp[0] == 0x6E)
+            self._log(f"写入 0x{did_id:04X} {'成功' if ok else '失败'}",
+                      "SUCCESS" if ok else "ERROR")
+            # 手动操作区展示写入详情（§5）
+            req = bytes([0x2E, (did_id >> 8) & 0xFF, did_id & 0xFF]) + data
+            self._lbl_req.setText(req.hex(" ").upper())
+            self._lbl_resp.setText(resp.hex(" ").upper() if resp else "--")
+            self._lbl_decoded.setText("写入成功" if ok else "写入失败")
+            if not ok and resp and resp[0] == 0x7F and len(resp) > 2:
+                self._lbl_decoded.setText(f"负响应 0x{resp[2]:02X}")
+
+    def _on_task_error(self, task, msg: str):
+        kind, did_id, arg = task
+        self._log(f"操作 0x{did_id:04X} 异常: {msg}", "ERROR")
+        if kind == "read" and arg:
+            self._show_detail(did_id, None, None, f"异常: {msg}")
+
+    @staticmethod
+    def _describe_bad_resp(resp) -> str:
+        """失败响应明细: 超时/负响应NRC/意外格式"""
+        if resp is None:
+            return "无响应(超时)"
+        if len(resp) >= 3 and resp[0] == 0x7F:
+            return f"负响应 NRC 0x{resp[2]:02X}"
+        return f"意外响应 {resp.hex(' ').upper()}"
 
     @staticmethod
     def _decode_payload(payload: bytes) -> str:
@@ -245,7 +330,6 @@ class DidPanel(QWidget):
         try:
             did_id = int(did_text.replace("0x", ""), 16)
             self._do_read_did(did_id, show_detail=True)
-            self._refresh_table()
         except ValueError:
             self._log("DID格式错误")
 
@@ -261,21 +345,6 @@ class DidPanel(QWidget):
             self._do_write_did(did_id, data)
         except ValueError:
             self._log("数据格式错误")
-
-    def _do_write_did(self, did_id: int, data: bytes):
-        if not self._uds_client:
-            self._log("未连接UDS客户端")
-            return
-        resp = self._uds_client.write_data_by_identifier(did_id, data)
-        ok = bool(resp and resp[0] == 0x6E)
-        self._log(f"写入 0x{did_id:04X} {'成功' if ok else '失败'}")
-        # 手动操作区展示写入详情（§5）
-        req = bytes([0x2E, (did_id >> 8) & 0xFF, did_id & 0xFF]) + data
-        self._lbl_req.setText(req.hex(" ").upper())
-        self._lbl_resp.setText(resp.hex(" ").upper() if resp else "--")
-        self._lbl_decoded.setText("写入成功" if ok else "写入失败")
-        if not ok and resp and resp[0] == 0x7F and len(resp) > 2:
-            self._lbl_decoded.setText(f"负响应 0x{resp[2]:02X}")
 
     def _apply_search(self, text: str):
         """按DID或名称过滤表格行"""
@@ -319,7 +388,7 @@ class DidPanel(QWidget):
             self._did_manager.stop_polling()
             self._log("停止轮询")
 
-    def _log(self, msg: str):
-        import time
-        ts = time.strftime("%H:%M:%S")
-        self._log_text.append(f"[{ts}] {msg}")
+    def _log(self, msg: str, level: str = "INFO"):
+        # 面板不内置日志窗口，统一转发到主窗口业务日志（信号线程安全，
+        # 后台任务回调线程发射自动降级为队列投递）
+        self.business_log.emit(msg, level)

@@ -3,6 +3,7 @@
 from abc import ABC, abstractmethod
 from typing import Optional, Callable
 from src.models.can_message import CanMessage
+from src.log import comm_logger
 
 
 class CanInterfaceBase(ABC):
@@ -27,7 +28,19 @@ class CanInterfaceBase(ABC):
             self._message_listeners.remove(callback)
 
     def _notify_message(self, direction: str, msg: CanMessage):
-        """通知所有监听器（子类在send/receive成功后调用）"""
+        """通知所有监听器（子类在send/receive成功后调用）
+
+        同时将帧写入comm日志文件（logs/comm/），保留总线级收发证据:
+        仅靠界面日志无法区分"ECU未回"与"驱动未收到"，帧级日志是
+        物理层问题定位的关键证据。
+        """
+        try:
+            if direction == "RX":
+                comm_logger.log_rx(msg.can_id, msg.data, msg.dlc)
+            else:
+                comm_logger.log_tx(msg.can_id, msg.data, msg.dlc)
+        except Exception:
+            pass  # 日志失败不影响通信主流程
         for cb in self._message_listeners:
             try:
                 cb(direction, msg)

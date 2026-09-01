@@ -100,10 +100,16 @@ class TransportLayer:
 
     def receive_tp(self, timeout: float = None) -> Optional[bytes]:
         """接收TP层数据（自动重组）
-        
+
+        超时语义遭循ISO 15765-2:
+        - 等待首帧/单帧(SF/FF): 整体deadline = timeout（P2）
+        - 多帧接收中(N_Cr): 每收到一个CF重置deadline，否则真实ECU
+          的FF→FC往返+逐帧CF延迟会被整体deadline误杀（自检单帧通过、
+          DTC/DID多帧响应全部超时的根因）
+
         Args:
             timeout: 超时时间（秒）
-            
+
         Returns:
             完整的UDS数据，超时返回None
         """
@@ -114,8 +120,8 @@ class TransportLayer:
         self._rx_buffer = bytearray()
         self._rx_receiving = False
 
-        while (time.time() - start_time) < timeout:
-            msg = self._can.receive(timeout=0.1)
+        while time.time() - start_time < timeout:
+            msg = self._can.receive(timeout=0.05)
             if msg is None:
                 continue
 
@@ -134,12 +140,16 @@ class TransportLayer:
                 self._receive_first_frame(msg.data)
                 # 发送流控帧
                 self._send_flow_control(can_id=self._tx_id)
+                # 多帧接收开始: 重置deadline，后续按N_Cr计时
+                start_time = time.time()
                 continue
 
             elif frame_type == FrameType.CONSECUTIVE_FRAME:
                 result = self._receive_consecutive_frame(msg.data)
                 if result is not None:
                     return result
+                # 每收到一个CF重置deadline（N_Cr: 相邻CF间隔计时）
+                start_time = time.time()
                 continue
 
         return None

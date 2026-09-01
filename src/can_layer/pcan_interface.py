@@ -1,5 +1,6 @@
 """CAN硬件抽象层 - PCAN适配器"""
 
+import time
 from typing import Optional
 from src.can_layer.can_interface import CanInterfaceBase
 from src.models.can_message import CanMessage, CanMessageType, CanDirection
@@ -54,10 +55,10 @@ class PcanInterface(CanInterfaceBase):
 
     def connect(self, config: dict) -> bool:
         """连接CAN接口
-        
+
         Args:
             config: 连接配置字典
-            
+
         Returns:
             连接成功返回True，失败返回False（错误信息可通过last_error获取）
         """
@@ -76,16 +77,66 @@ class PcanInterface(CanInterfaceBase):
             self._last_error = ""
             return True
         except Exception as e:
+            err_text = str(e)
+            # Initialize失败(如0x40: 通道未初始化/初始化过程失败)常见于
+            # 残留句柄或驱动状态异常——先CAN_Uninitialize清理再重试。
+            # 驱动释放句柄需要时间，立即重Initialize仍会失败，需短暂延时
+            for delay in (0.2, 0.5):
+                if not self._uninitialize_handle(self._channel):
+                    break
+                time.sleep(delay)
+                try:
+                    self._bus = can.Bus(
+                        channel=self._channel,
+                        interface="pcan",
+                        bitrate=self._bitrate,
+                    )
+                    self._connected = True
+                    self._tx_count = 0
+                    self._rx_count = 0
+                    self._last_error = ""
+                    return True
+                except Exception as e2:
+                    err_text = str(e2)
             self._connected = False
             self._bus = None
-            self._last_error = str(e)
+            self._last_error = (
+                f"{err_text}\n\n建议: 重新插拔PCAN设备后重试; "
+                "若仍失败请重启应用")
             return False
+
+    _PCAN_HANDLES = {
+        **{f"PCAN_USBBUS{i}": 0x50 + i for i in range(1, 9)},
+        **{f"PCAN_PCIBUS{i}": 0x40 + i - 1 for i in range(1, 5)},
+        "PCAN_DNGBUS1": 0x81,
+    }
 
     def disconnect(self) -> None:
         if self._bus:
-            self._bus.shutdown()
+            try:
+                self._bus.shutdown()
+            except Exception:
+                # shutdown失败也要释放bus引用，避免句柄泄漏卡死后续重连
+                self._uninitialize_handle(self._channel)
             self._bus = None
         self._connected = False
+
+    def _uninitialize_handle(self, channel: str) -> bool:
+        """直接调PCAN驱动CAN_Uninitialize清理残留句柄
+
+        断开时序异常或驱动状态坏(如0x40)时，同进程内重新Initialize
+        可能一直失败——先强制释放通道句柄再重试。
+        """
+        handle = self._PCAN_HANDLES.get(str(channel).strip().upper())
+        if handle is None:
+            return False
+        try:
+            import ctypes
+            dll = ctypes.WinDLL("PCANBasic.dll")
+            dll.CAN_Uninitialize(ctypes.c_ubyte(handle))
+            return True
+        except Exception:
+            return False
 
     def send(self, msg: CanMessage) -> bool:
         if not self._connected or not self._bus:

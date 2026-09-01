@@ -64,12 +64,14 @@ class UdsClient:
     def rx_id(self, value: int):
         self._tp.rx_id = value
 
-    def send_raw(self, data: bytes, timeout: float = None) -> Optional[bytes]:
+    def send_raw(self, data: bytes, timeout: float = None,
+                 wait_response: bool = True) -> Optional[bytes]:
         """发送原始UDS请求并等待响应
         
         Args:
             data: 请求数据
             timeout: 超时时间（秒）
+            wait_response: False时发送后不等待（用于抑制正响应的请求）
             
         Returns:
             响应数据，超时返回None
@@ -83,7 +85,10 @@ class UdsClient:
             self._logger.error(f"发送失败: {self._bytes_to_hex(data)}")
             return None
 
-        response = self._receive_with_pending(timeout)
+        if not wait_response:
+            return None
+
+        response = self._receive_with_pending(timeout, data[0])
         if response:
             self._log_response(response)
         else:
@@ -91,8 +96,14 @@ class UdsClient:
 
         return response
 
-    def _receive_with_pending(self, timeout: float) -> Optional[bytes]:
-        """接收响应，处理pending (0x78)响应"""
+    def _receive_with_pending(self, timeout: float,
+                             req_sid: int = None) -> Optional[bytes]:
+        """接收响应，处理pending (0x78)响应与陈旧帧
+
+        仅接受与当前请求SID匹配的响应（正响应=req_sid+0x40，
+        负响应=0x7F+req_sid），丢弃其他无关帧（如后台保活
+        3E 80 的历史响应），避免错配导致服务误判失败。
+        """
         deadline = time.time() + self._p2_star_timeout
 
         while time.time() < deadline:
@@ -104,6 +115,17 @@ class UdsClient:
             if len(response) >= 3 and response[0] == 0x7F and response[2] == 0x78:
                 self._logger.info(f"收到pending响应 (NRC=0x78), 继续等待...")
                 continue
+
+            # SID关联校验: 丢弃与当前请求无关的陈旧响应
+            if req_sid is not None and response:
+                pos_match = response[0] == ((req_sid + 0x40) & 0xFF)
+                neg_match = (response[0] == 0x7F and len(response) >= 2
+                             and response[1] == req_sid)
+                if not (pos_match or neg_match):
+                    self._logger.warning(
+                        f"丢弃无关响应: {self._bytes_to_hex(response)} "
+                        f"(期望请求SID=0x{req_sid:02X}的响应)")
+                    continue
 
             return response
 
@@ -174,6 +196,9 @@ class UdsClient:
     def tester_present(self, suppress_response: bool = False) -> Optional[bytes]:
         """TesterPresent保活"""
         data = UdsService.encode_tester_present(suppress_response)
+        if suppress_response:
+            # 抑制正响应: ECU不回复，发送后无需等待（也避免占用接收队列）
+            return self.send_raw(data, wait_response=False)
         return self.send_raw(data)
 
     def control_dtc_setting(self, on: bool = True) -> Optional[bytes]:

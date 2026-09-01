@@ -2,15 +2,18 @@
 
 from PyQt6.QtWidgets import (QWidget, QVBoxLayout, QHBoxLayout, QGroupBox,
                               QLabel, QPushButton, QSpinBox, QLineEdit,
-                              QTextEdit, QComboBox, QFormLayout, QProgressBar,
+                              QComboBox, QFormLayout, QProgressBar,
                               QFileDialog, QMessageBox)
-from PyQt6.QtCore import QTimer
+from PyQt6.QtCore import QTimer, pyqtSignal
 from src.business.security_manager import SecurityManager
 from src.utils.config_manager import get_config_manager
 
 
 class SecurityPanel(QWidget):
     """安全访问面板"""
+
+    # 业务日志转发(msg, level): 面板不再内置日志窗口，统一由主窗口业务日志呈现
+    business_log = pyqtSignal(str, str)
 
     def __init__(self, uds_client=None, parent=None):
         super().__init__(parent)
@@ -156,12 +159,6 @@ class SecurityPanel(QWidget):
         test_group.setLayout(test_layout)
         layout.addWidget(test_group)
 
-        # 日志
-        self._log_text = QTextEdit()
-        self._log_text.setReadOnly(True)
-        self._log_text.setMaximumHeight(120)
-        layout.addWidget(self._log_text)
-
         layout.addStretch()
 
     def _refresh_algo_list(self):
@@ -277,7 +274,5 @@ class SecurityPanel(QWidget):
             self._status_label.setText("已超时")
             self._status_label.setStyleSheet("color: #FF9800; font-weight: bold;")
 
-    def _log(self, msg: str):
-        import time
-        ts = time.strftime("%H:%M:%S")
-        self._log_text.append(f"[{ts}] {msg}")
+    def _log(self, msg: str, level: str = "INFO"):
+        self.business_log.emit(msg, level)

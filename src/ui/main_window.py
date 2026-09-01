@@ -13,7 +13,8 @@ import subprocess
 from PyQt6.QtWidgets import (
     QMainWindow, QWidget, QVBoxLayout, QSplitter,
     QTabWidget, QToolBar, QStatusBar, QLabel, QMenu, QTreeWidget,
-    QTreeWidgetItem, QInputDialog, QMessageBox, QFileDialog, QSizePolicy
+    QTreeWidgetItem, QInputDialog, QMessageBox, QFileDialog, QSizePolicy,
+    QApplication, QScrollArea, QFrame
 )
 from PyQt6.QtCore import Qt, QTimer, QThread, pyqtSignal
 from PyQt6.QtGui import QAction, QKeySequence, QFont
@@ -68,6 +69,9 @@ class MainWindow(QMainWindow):
         self._ecu_defs: list = []
         self._current_ecu: EcuDefinition = None
         self._ecu_items: dict = {}     # ECU名 -> 项目树item
+        # 自检验证在线的ECU地址对集合(tx, rx): 树图标/徽章的真实依据，
+        # 区别于"总线已连接"——当前ECU不响应时不应显示在线
+        self._ecu_online: set = set()
 
         self._init_ui()
         self._init_menu()
@@ -87,8 +91,15 @@ class MainWindow(QMainWindow):
 
     def _init_ui(self):
         self.setWindowTitle("ECU Diagnostic Studio - CAN UDS 诊断仪")
-        self.setMinimumSize(1200, 800)
+        # 最小尺寸需适配小屏幕（笔记本可用区可低至~1366x688），
+        # 过大的硬性最小值会导致窗口无法缩小、底部内容永久在屏幕外
+        self.setMinimumSize(900, 600)
         self.resize(1440, 900)
+        # 启动时收缩到当前屏幕可用区内（如小尺寸笔记本屏）
+        screen = QApplication.primaryScreen()
+        if screen is not None:
+            avail = screen.availableGeometry()
+            self.resize(min(1440, avail.width()), min(900, avail.height()))
 
         central = QWidget()
         self.setCentralWidget(central)
@@ -144,10 +155,18 @@ class MainWindow(QMainWindow):
         self._nav.addTab(self._trace_view, "报文分析")
         self._nav.addTab(self._report_view, "报告中心")
         self._nav.addTab(self._tools_view, "工具中心")
-        h_splitter.addWidget(self._nav)
+        # 工作区包滚动区: 小屏（笔记本150%缩放下逻辑可用区可低至1280x752）
+        # 工作区被压缩时以滚动条代替裁切，保证被压缩区域的内容可达可读
+        self._nav_scroll = QScrollArea()
+        self._nav_scroll.setWidget(self._nav)
+        self._nav_scroll.setWidgetResizable(True)
+        self._nav_scroll.setFrameShape(QFrame.Shape.NoFrame)
+        h_splitter.addWidget(self._nav_scroll)
 
         h_splitter.setStretchFactor(0, 1)
         h_splitter.setStretchFactor(1, 6)
+        # 注: 工作区不再设固定最小高度——其自然最小尺寸(约620px)由滚动区
+        # 接管，空间不足时出滚动条而非裁切内容
 
         # 刷写安全钩子: 复用安全面板已加载的算法插件 (level, seed) -> key
         _sm = self._diag_view.security_panel.security_manager
@@ -156,11 +175,22 @@ class MainWindow(QMainWindow):
 
         # ---- 底部: 可折叠日志面板（§7）----
         self._log_dock = LogDock()
+        # ECU诊断子面板日志统一汇入底部业务日志（面板已不内置日志窗口）
+        self._diag_view.business_log.connect(self._log_dock.log_business)
+        self._log_dock.setMinimumHeight(170)  # 防止被挤压到无法阅读报文
         self._v_splitter.addWidget(self._log_dock)
         self._v_splitter.setStretchFactor(0, 1)
         self._v_splitter.setStretchFactor(1, 0)
-        # 日志面板默认高度: 保证能显示约8行报文（§7）
-        self._v_splitter.setSizes([640, 260])
+        self._v_splitter.setChildrenCollapsible(False)
+        # 日志面板高度: 优先恢复用户上次拖拽的位置，否则默认约屏高4成
+        saved_dock_h = int(self._config.get("ui.log_dock_height", 0) or 0)
+        # 上限同时受窗口高度约束（工作区至少保前340px最小高度）
+        max_dock_h = min(780, max(170, self.height() - 340))
+        if 170 <= saved_dock_h <= max_dock_h:
+            dock_h = saved_dock_h
+        else:
+            dock_h = min(380, max(170, self.height() // 2))
+        self._v_splitter.setSizes([max(340, self.height() - dock_h), dock_h])
 
         # 加载ECU定义并构建项目树
         self._ecu_defs = load_ecu_definitions()
@@ -242,17 +272,30 @@ class MainWindow(QMainWindow):
         self._project_tree.expandAll()
 
     def _network_text(self) -> str:
-        """网络节点文本: 通道 + 波特率"""
+        """网络节点文本: 实时连接状态（接口 + 通道 + 波特率）
+
+        未连接时显示"未连接"而非配置值，避免误导用户以为已连通。
+        """
         try:
+            if (self._uds_client is None
+                    or not self._connection_panel.is_connected):
+                return "未连接"
+            iface = self._connection_panel.can_interface
+            name = iface.interface_name if iface is not None else "CAN"
             ch = self._connection_panel.channel or "--"
             br = self._connection_panel.bitrate
-            return f"CAN | {ch} | {br // 1000}k"
+            return f"{name} | {ch} | {br // 1000}k"
         except Exception:
-            return "CAN"
+            return "未连接"
 
     def _refresh_ecu_icons(self):
-        """刷新ECU在线状态图标并高亮当前ECU"""
-        online = self._uds_client is not None
+        """刷新ECU在线状态图标并高亮当前ECU
+
+        在线判定: 连通性自检通过过的地址对(_ecu_online)，
+        或最近一次全车扫描中响应过（存入_scan_online）。
+        仅"总线已连接"不再直接点亮——避免切到未响应ECU时误示在线。
+        """
+        scan_online = getattr(self, "_scan_online", None) or set()
         norm = QFont()
         bold = QFont()
         bold.setBold(True)
@@ -262,7 +305,9 @@ class MainWindow(QMainWindow):
                 continue
             is_current = (self._current_ecu is not None
                           and defn.name == self._current_ecu.name)
-            icon = _ICON_ON if (is_current and online) else _ICON_OFF
+            verified = (defn.tx_id, defn.rx_id) in self._ecu_online
+            scanned = (defn.tx_id, defn.rx_id) in scan_online
+            icon = _ICON_ON if (verified or scanned) else _ICON_OFF
             item.setText(0, f"{icon} {defn.name}")
             # 当前ECU加粗高亮，一眼可识别当前上下文（§9）
             item.setFont(0, bold if is_current else norm)
@@ -361,7 +406,11 @@ class MainWindow(QMainWindow):
     # ---------------- ECU选择 ----------------
 
     def _select_ecu(self, defn: EcuDefinition):
-        """选中ECU: 应用其地址到连接配置，并更新诊断工作区上下文"""
+        """选中ECU: 应用其地址到连接配置，并更新诊断工作区上下文
+
+        多ECU在线切换: 若总线已连接（CAN），热切换UDS寻址到新ECU地址对
+        并重新自检——无需断开重连，点击项目树即可在多个在线ECU间切换。
+        """
         self._current_ecu = defn
         self._connection_panel.set_uds_ids(defn.tx_id, defn.rx_id)
         self._diag_view.set_ecu(defn)
@@ -372,10 +421,42 @@ class MainWindow(QMainWindow):
         self._lbl_ecu.setText(ecu_text)
         self._config.set("project.current_ecu", defn.name)
         self._refresh_ecu_icons()
+        # 已连接且地址变化 → 热切换寻址（总线不断开）
+        if self._uds_client is not None:
+            if self._connection_panel.is_doip:
+                self._log_dock.log_business(
+                    f"切换到 ECU {defn.name}: DoIP连接需重新建立（断开后重连）",
+                    "WARNING")
+            elif (self._uds_client.tx_id, self._uds_client.rx_id) \
+                    != (defn.tx_id, defn.rx_id):
+                self._hot_switch_ecu(defn)
         self._log_dock.log_business(
             f"选择 ECU: {defn.name} (TX 0x{defn.tx_id:03X} / RX 0x{defn.rx_id:03X})")
         self._statusbar.showMessage(
             f"已选择 ECU: {defn.name} (0x{defn.tx_id:03X}/0x{defn.rx_id:03X})", 3000)
+
+    def _hot_switch_ecu(self, defn: EcuDefinition):
+        """已连接状态下切换ECU: 重定向UDS寻址并重新自检（总线保持打开）
+
+        停保活→改地址→恢复保活→自检，避免保活线程与新地址的请求交错。
+        """
+        sp = self._diag_view.session_panel
+        sp.pause_keepalive()
+        try:
+            self._uds_client.tx_id = defn.tx_id
+            self._uds_client.rx_id = defn.rx_id
+        finally:
+            sp.resume_keepalive()
+        # 同步UI地址信息（通信信息区TX/RX）
+        can_iface = self._connection_panel.can_interface
+        if can_iface is not None:
+            self._diag_view.set_connection_info(
+                can_iface.interface_name, can_iface.channel_info,
+                self._connection_panel.bitrate, defn.tx_id, defn.rx_id)
+        self._log_dock.log_business(
+            f"已切换寻址到 ECU {defn.name} "
+            f"(0x{defn.tx_id:03X}/0x{defn.rx_id:03X})，正在自检...")
+        self._link_check()
 
     def _restore_current_ecu(self):
         """启动时恢复上次选中的ECU；首次启动优先选地址与CAN配置匹配的ECU"""
@@ -530,14 +611,18 @@ class MainWindow(QMainWindow):
         self._btn_log.triggered.connect(self._toggle_log_dock)
         toolbar.addAction(self._btn_log)
 
-        # 连接状态行（§2: 通道 | 波特率 | 连接状态）
+        # 右上角连接状态标签: 全局常驻反馈（ECU诊断页外的页面无Online指示）
+        self._conn_label = QLabel("未连接")
+        self._conn_label.setStyleSheet("color: #888;")
         spacer = QWidget()
         spacer.setSizePolicy(QSizePolicy.Policy.Expanding,
                              QSizePolicy.Policy.Preferred)
         toolbar.addWidget(spacer)
-        self._conn_label = QLabel("未连接")
-        self._conn_label.setStyleSheet("color: #888;")
         toolbar.addWidget(self._conn_label)
+
+        # 按钮联动: 连接后"连接"禁用/"断开"与"扫描"可用；初始未连接
+        self._btn_disconnect.setEnabled(False)
+        self._btn_scan.setEnabled(False)
 
     def _init_statusbar(self):
         """状态栏（§8）: 独立状态块，块间有边框分隔"""
@@ -703,6 +788,23 @@ class MainWindow(QMainWindow):
                 addr_tx, addr_rx = tx_id, rx_id
                 self._log_dock.can_trace.clear_doip_context()
                 self._trace_view.can_trace.clear_doip_context()
+                # 连接成功后按实际通信地址识别ECU: 若连接面板配置的地址对
+                # 与当前选中的ECU不一致（如手动填了DASH地址但树选的是BCM），
+                # 自动切换ECU上下文，避免"显示BCM实际在跟DASH说话"的错位
+                matched = next((d for d in self._ecu_defs
+                                if (d.tx_id, d.rx_id) == (tx_id, rx_id)), None)
+                if matched is not None and matched is not self._current_ecu:
+                    self._log_dock.log_business(
+                        f"连接地址 0x{tx_id:03X}/0x{rx_id:03X} 匹配 ECU "
+                        f"{matched.name}，自动切换ECU上下文", "INFO")
+                    self._select_ecu(matched)
+                elif matched is None and self._current_ecu is not None \
+                        and (self._current_ecu.tx_id, self._current_ecu.rx_id) \
+                        != (tx_id, rx_id):
+                    self._log_dock.log_business(
+                        f"注意: 连接地址 0x{tx_id:03X}/0x{rx_id:03X} 与当前ECU "
+                        f"{self._current_ecu.name}(0x{self._current_ecu.tx_id:03X}/"
+                        f"0x{self._current_ecu.rx_id:03X})不一致", "WARNING")
 
             # 注入UDS客户端到所有工作区
             self._diag_view.set_uds_client(self._uds_client)
@@ -717,6 +819,7 @@ class MainWindow(QMainWindow):
 
             # 诊断工作区在线状态与状态卡Communication块
             self._diag_view.set_online(True)
+            self._ecu_online.clear()  # 旧连接的在线记录作废，等自检重新验证
             self._diag_view.set_connection_info(
                 can_iface.interface_name, can_iface.channel_info,
                 bitrate, addr_tx, addr_rx)
@@ -729,13 +832,30 @@ class MainWindow(QMainWindow):
             self._set_dot(self._lbl_uds, "UDS", True)
             self._lbl_vci.setText(f"VCI: {can_iface.interface_name}")
             self._lbl_bus.setText(bus_text)
+            # 工具栏按钮联动: 连接后"连接"禁用，"断开"与"全车扫描"可用
+            self._btn_connect.setEnabled(False)
+            self._btn_disconnect.setEnabled(True)
+            self._btn_scan.setEnabled(True)
+            self._conn_label.setText(
+                f"已连接 {can_iface.interface_name} | {bus_text}")
+            self._conn_label.setStyleSheet("color: #4CAF50;")
             ecu_name = self._current_ecu.name if self._current_ecu else "--"
             self._lbl_ecu.setText(f"ECU: {ecu_name} | Online")
             self._lbl_session.setText("Session: 默认")
             self._log_dock.log_business(
                 f"已连接 {can_iface.interface_name} | {bus_text}")
             self._refresh_overview_info()
+            # 连接后连通性自检: 发 TesterPresent 验证ECU真实可达，
+            # 区分"总线已打开"与"ECU有响应"，避免误示Online
+            self._link_check()
         else:
+            # 断开前先等后台UDS线程（自检/扫描等）退出，避免与Uninitialize
+            # 并发读写使驱动进入异常状态——这是快速连断时概率性重连失败的根因
+            for attr in ("_link_thread", "_scan_thread", "_cleardtc_thread"):
+                th = getattr(self, attr, None)
+                if th is not None:
+                    th.wait(1500)
+                    setattr(self, attr, None)
             can_iface = self._connection_panel.can_interface
             if can_iface is not None:
                 can_iface.remove_message_listener(self._on_can_message)
@@ -747,6 +867,7 @@ class MainWindow(QMainWindow):
             self._trace_view.set_uds_client(None)
             self._trace_view.set_can_interface(None)
             self._diag_view.set_online(False)
+            self._ecu_online.clear()
             self._log_dock.can_trace.clear_doip_context()
             self._trace_view.can_trace.clear_doip_context()
 
@@ -754,11 +875,75 @@ class MainWindow(QMainWindow):
             self._set_dot(self._lbl_uds, "UDS", False)
             self._lbl_vci.setText("VCI: --")
             self._lbl_bus.setText("--")
+            self._btn_connect.setEnabled(True)
+            self._btn_disconnect.setEnabled(False)
+            self._btn_scan.setEnabled(False)
+            self._conn_label.setText("未连接")
+            self._conn_label.setStyleSheet("color: #888;")
+            self._refresh_overview_info()
             ecu_name = self._current_ecu.name if self._current_ecu else "--"
             self._lbl_ecu.setText(f"ECU: {ecu_name} | Offline")
             self._log_dock.log_business("已断开连接")
 
         self._refresh_ecu_icons()
+
+    def _link_check(self):
+        """连接后连通性自检（后台发 3E 00 验证ECU响应）
+
+        总线打开成功≠ECU可达: 无响应时明确告警（波特率/接线/供电），
+        避免用户误以为已连通而扫描全离线。
+        """
+        if self._uds_client is None:
+            return
+        client = self._uds_client
+        ecu = self._current_ecu  # 捕获发起时的ECU，避免自检在递时切换上下文错记
+
+        def _check():
+            # 非抑制 TesterPresent: ECU 应回 7E 00
+            return client.tester_present(suppress_response=False)
+
+        def _on_ok(resp):
+            if resp and resp[0] == 0x7E:
+                self._log_dock.log_business(
+                    f"连通性自检通过: {ecu.name if ecu else 'ECU'}响应正常",
+                    "SUCCESS")
+                self._diag_view.set_ecu_reachability(True)
+                if ecu is not None:
+                    self._ecu_online.add((ecu.tx_id, ecu.rx_id))
+                    self._refresh_ecu_icons()
+            else:
+                self._link_check_fail()
+
+        def _on_err(_msg):
+            self._link_check_fail()
+
+        self._start_worker(_check, (), _on_ok, _on_err,
+                           "_link_worker", "_link_thread")
+
+    def _link_check_fail(self):
+        ecu_name = self._current_ecu.name if self._current_ecu else "--"
+        self._lbl_ecu.setText(f"ECU: {ecu_name} | 无响应")
+        self._diag_view.set_ecu_reachability(False)
+        # 该ECU未通过自检: 从在线集合移除，树图标不再点亮
+        if self._current_ecu is not None:
+            self._ecu_online.discard(
+                (self._current_ecu.tx_id, self._current_ecu.rx_id))
+            self._refresh_ecu_icons()
+        # 附上总线级收发计数，直接暴露"只发不收"证据
+        stats = ""
+        try:
+            iface = self._connection_panel.can_interface
+            if iface is not None:
+                st = iface.get_stats()
+                stats = f"（总线计数 TX:{st.get('tx_count', '?')} " \
+                        f"RX:{st.get('rx_count', '?')}）"
+        except Exception:
+            pass
+        self._log_dock.log_business(
+            f"连通性自检失败: ECU无响应{stats}，已发 3E 00 无 7E 00 回复。"
+            "RX为0说明总线无任何响应帧，请依次检查: ECU供电与唤起、"
+            "波特率（两端是否一致）、终端电阻、CAN高/低线接线、"
+            "PCAN设备指示灯", "WARNING")
 
     def _on_can_message(self, direction: str, msg):
         """CAN报文监听回调（可能在后台线程），转发到底部日志面板与报文分析工作区"""
@@ -800,11 +985,15 @@ class MainWindow(QMainWindow):
     def _on_scan(self):
         """ECU全扫描（§10）: 对已定义地址逐个发 0x10 01 识别在线状态"""
         if self._uds_client is None or self._connection_panel.can_interface is None:
-            QMessageBox.information(self, "ECU全扫描", "请先连接CAN再执行扫描")
+            QMessageBox.information(
+                self, "ECU全扫描",
+                "请先建立诊断连接（连接 CAN 总线或 DoIP）再执行全车扫描")
             return
         if getattr(self, "_scan_thread", None) is not None:
             self._statusbar.showMessage("扫描进行中...", 2000)
             return
+        # 扫描期间暂停会话保持，避免 3E 保活帧与扫描请求交错干扰ECU响应
+        self._diag_view.session_panel.pause_keepalive()
         pairs = [(d.tx_id, d.rx_id) for d in self._ecu_defs]
         scanner = EcuScanner(can_interface=self._connection_panel.can_interface)
         self._log_dock.log_business(
@@ -818,7 +1007,9 @@ class MainWindow(QMainWindow):
     def _on_scan_done(self, results):
         """扫描完成: 结果表+车辆总览拓扑更新+扫描报告导出（§5）"""
         from datetime import datetime
+        self._diag_view.session_panel.resume_keepalive()  # 恢复会话保持
         found = {(e.tx_id, e.rx_id) for e in results}
+        self._scan_online = found  # 供项目树图标显示扫描发现在线状态
         lines = []
         for d in self._ecu_defs:
             online = (d.tx_id, d.rx_id) in found
@@ -851,6 +1042,7 @@ class MainWindow(QMainWindow):
 
     def _on_scan_error(self, msg):
         self._statusbar.clearMessage()
+        self._diag_view.session_panel.resume_keepalive()  # 恢复会话保持
         self._log_dock.log_business(f"ECU扫描异常: {msg}", "ERROR")
 
     def _start_worker(self, func, args: tuple, on_done, on_error,
@@ -1160,7 +1352,8 @@ class MainWindow(QMainWindow):
     def _on_clear_dtc(self):
         """清除所有DTC: 发送 0x14 FF FF FF（真实UDS调用）"""
         if self._uds_client is None:
-            QMessageBox.information(self, "清除DTC", "请先连接CAN再执行清除DTC")
+            QMessageBox.information(
+                self, "清除DTC", "请先建立诊断连接再执行清除DTC")
             return
         ecu_name = self._current_ecu.name if self._current_ecu else "--"
         reply = QMessageBox.question(
@@ -1361,12 +1554,51 @@ class MainWindow(QMainWindow):
                 self._config.set("ui.theme", new_theme)
                 self._log_dock.log_business(f"主题切换: {new_theme}")
 
+    # ---------------- 屏幕适配 ----------------
+
+    def _clamp_to_screen(self):
+        """窗口适配: 收缩到当前屏幕可用区内，并确保标题栏可见可拖动"""
+        screen = self.screen() or QApplication.primaryScreen()
+        if screen is None:
+            return
+        avail = screen.availableGeometry()
+        w = min(self.width(), avail.width())
+        h = min(self.height(), avail.height())
+        if (w, h) != (self.width(), self.height()):
+            self.resize(w, h)
+        # 超出可视区（如从大显示器拖到小笔记本屏）时收回屏内
+        if (self.x() + w > avail.right() or self.y() + h > avail.bottom()
+                or self.x() < avail.left() or self.y() < avail.top()):
+            self.move(max(avail.left(), min(self.x(), avail.right() - w)),
+                      max(avail.top(), min(self.y(), avail.bottom() - h)))
+
+    def showEvent(self, event):
+        """首次显示时适配屏幕，并监听后续跨屏拖动"""
+        super().showEvent(event)
+        self._clamp_to_screen()
+        handle = self.windowHandle()
+        if handle is not None:
+            try:
+                handle.screenChanged.connect(self._on_screen_changed)
+            except (TypeError, RuntimeError):
+                pass
+
+    def _on_screen_changed(self, _screen):
+        """窗口被拖到另一块屏幕: 按新屏可用区收缩并收回屏内"""
+        self._clamp_to_screen()
+        # DPI不同的屏之间拖动时（如100%外接屏→150%笔记本屏），
+        # 几何信息在切换瞬间尚未稳定，延迟再校正一次
+        QTimer.singleShot(150, self._clamp_to_screen)
+
     def closeEvent(self, event):
         """退出时自动保存连接参数与当前ECU，关闭桥接子进程"""
         try:
             self._connection_panel.save_to_config()
             if self._current_ecu is not None:
                 self._config.set("project.current_ecu", self._current_ecu.name)
+            # 记住日志面板拖拽后的高度（折叠状态除外）
+            if not self._log_dock.collapsed:
+                self._config.set("ui.log_dock_height", self._log_dock.height())
             self._config.save_config()
         except Exception:
             pass

@@ -12,7 +12,7 @@
 from PyQt6.QtWidgets import (QWidget, QVBoxLayout, QHBoxLayout, QGridLayout,
                               QGroupBox, QLabel, QPushButton, QTabWidget,
                               QStackedWidget, QScrollArea, QFrame)
-from PyQt6.QtCore import Qt, QThread
+from PyQt6.QtCore import Qt, QThread, pyqtSignal
 from src.ui.async_uds import UdsWorker
 from src.ui.views.uds_service_view import UdsServiceView
 from src.ui.panels.dtc_panel import DtcPanel
@@ -29,6 +29,10 @@ from src.config.ecu_definition import EcuDefinition
 
 class DiagnosticView(QWidget):
     """ECU诊断工作区"""
+
+    # 聚合的业务日志信号(msg, level): 子面板不再内置日志窗口，
+    # 统一经此转发到主窗口底部业务日志（带功能页前缀）
+    business_log = pyqtSignal(str, str)
 
     # 快捷入口条定义: 图标 + 名称（§6 功能页签的快捷入口形式）
     _QUICK_ENTRIES = [
@@ -118,6 +122,17 @@ class DiagnosticView(QWidget):
             self._stack.addWidget(w)
         layout.addWidget(self._stack, 1)
 
+        # 子面板日志统一转发到业务日志（带功能页前缀便于追溯来源）
+        for panel, tag in ((self._dtc_panel, "DTC"),
+                           (self._did_panel, "DID"),
+                           (self._io_panel, "IO控制"),
+                           (self._routine_panel, "例程"),
+                           (self._session_panel, "会话"),
+                           (self._security_panel, "安全访问"),
+                           (self._sequence_panel, "序列")):
+            panel.business_log.connect(
+                lambda msg, lv, t=tag: self.business_log.emit(f"[{t}] {msg}", lv))
+
         self._select_quick("ECU信息")
 
     # ---------------- ECU信息卡（§5） ----------------
@@ -181,18 +196,21 @@ class DiagnosticView(QWidget):
         info_box = QGroupBox("ECU信息")
         info_layout = QVBoxLayout(info_box)
         info_layout.setSpacing(8)
-        head_row = QHBoxLayout()
-        head_row.addStretch()
+        # 字段区与按钮同排顶对齐: 按钮不再独占一行——
+        # 否则字段区整体被压低，与下方通信信息区错位（视觉"靠下"）
+        info_body = QHBoxLayout()
+        info_body.setSpacing(8)
+        self._info_grid = QGridLayout()
+        self._info_grid.setHorizontalSpacing(8)
+        self._info_grid.setVerticalSpacing(6)
+        info_body.addLayout(self._info_grid, 1)
         self._read_info_btn = QPushButton("读取 ECU 信息")
         self._read_info_btn.setObjectName("btn_primary")
         self._read_info_btn.setFixedWidth(130)
         self._read_info_btn.clicked.connect(self._read_info)
-        head_row.addWidget(self._read_info_btn)
-        info_layout.addLayout(head_row)
-        self._info_grid = QGridLayout()
-        self._info_grid.setHorizontalSpacing(8)
-        self._info_grid.setVerticalSpacing(6)
-        info_layout.addLayout(self._info_grid)
+        info_body.addWidget(self._read_info_btn, 0,
+                            Qt.AlignmentFlag.AlignTop)
+        info_layout.addLayout(info_body)
         self._info_labels: dict = {}   # 显示名 -> 值QLabel
         layout.addWidget(info_box)
 
@@ -295,7 +313,11 @@ class DiagnosticView(QWidget):
             panel.set_uds_client(client)
 
     def set_ecu(self, ecu: EcuDefinition):
-        """切换当前ECU: 更新头部/状态卡字段（配置驱动）"""
+        """切换当前ECU: 更新头部/状态卡字段（配置驱动）
+
+        切换后旧ECU的状态/数据一律作废: 诊断状态重置、DTC清空、
+        通信地址更新为新ECU的地址对——避免"看着BCM实际在跟DASH说话"的误导
+        """
         self._ecu = ecu
         self._title_label.setText(ecu.name)
         self._desc_label.setText(ecu.description or "")
@@ -305,7 +327,32 @@ class DiagnosticView(QWidget):
         self._st_diag_v2.setText("Locked")
         self._st_diag_v2.setStyleSheet("color: #888;")
         self._st_ecu_v1.setText(ecu.name)
+        self._st_ecu_v2.setText("--")
+        self._st_ecu_v2.setStyleSheet("color: #888;")
+        # DTC: 旧ECU的故障数据不再有效（未读取）
+        self._dtc_panel.clear_results()
+        self._st_dtc_v1.setText("0")
+        self._st_dtc_v1.setStyleSheet(
+            "color: #4CAF50; font-weight: bold; font-size: 15px;")
+        self._st_dtc_v2.setText("未读取")
+        # 通信信息区: 地址对同步为新ECU（即便未连接也显示将使用的地址）
+        self._lbl_addr.setText(f"0x{ecu.tx_id:03X} / 0x{ecu.rx_id:03X}")
         self._special_view.set_ecu(ecu)
+
+    def set_ecu_reachability(self, ok: bool):
+        """连通性自检结果: ECU状态区显示 Online/无响应
+
+        与 set_online（总线连接状态）分离: 总线开着但ECU不响应时，
+        头部徽章保持总线语义，ECU状态区明确显示"无响应"。
+        """
+        if ok:
+            self._st_ecu_v2.setText("Online")
+            self._st_ecu_v2.setStyleSheet(
+                "color: #4CAF50; font-weight: bold;")
+        else:
+            self._st_ecu_v2.setText("无响应")
+            self._st_ecu_v2.setStyleSheet(
+                "color: #F44336; font-weight: bold;")
 
     def set_online(self, online: bool):
         self._online_label.setText("● Online" if online else "● Offline")
@@ -315,11 +362,11 @@ class DiagnosticView(QWidget):
         style = self._online_label.style()
         style.unpolish(self._online_label)
         style.polish(self._online_label)
-        # ECU状态区同步（§9: 状态一眼可识别）
-        self._st_ecu_v2.setText("Online" if online else "Offline")
-        self._st_ecu_v2.setStyleSheet(
-            "color: #4CAF50; font-weight: bold;" if online
-            else "color: #888;")
+        # ECU状态区: 徽章表示总线连接；ECU可达性由自检结果驱动
+        # （set_ecu_reachability）。连接初期显示"自检中"，断开显示 Offline。
+        if not online:
+            self._st_ecu_v2.setText("Offline")
+            self._st_ecu_v2.setStyleSheet("color: #888;")
 
     def set_connection_info(self, interface_name: str, channel_info: str,
                             bitrate: int, tx_id: int, rx_id: int):

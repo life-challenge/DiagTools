@@ -438,15 +438,18 @@ class ConnectionPanel(QWidget):
             self._virtual_doip_ecu = None
 
     def _on_disconnect(self):
-        if self._can_interface:
-            self._can_interface.disconnect()
-        self._stop_virtual_doip_ecu()
         self._connected = False
         self._connect_btn.setEnabled(True)
         self._disconnect_btn.setEnabled(False)
         self._status_label.setText("状态: 未连接")
         self._status_label.setStyleSheet("color: #999; padding: 5px;")
+        # 先通知所有使用者停止(保活定时器/后台worker/报文监听)，
+        # 再关闭总线——PCAN驱动在Uninitialize与并发读写的交错下
+        # 可能进入异常状态，导致同进程内重连Initialize失败(0x40)
         self.connection_changed.emit(False)
+        if self._can_interface:
+            self._can_interface.disconnect()
+        self._stop_virtual_doip_ecu()
 
     def set_uds_ids(self, tx_id: int, rx_id: int):
         """由外部（如项目树选中ECU）注入UDS地址"""

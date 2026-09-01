@@ -1,12 +1,16 @@
 """例程控制面板"""
 
 from PyQt6.QtWidgets import (QWidget, QVBoxLayout, QHBoxLayout, QGroupBox,
-                              QLabel, QPushButton, QLineEdit, QTextEdit,
+                              QLabel, QPushButton, QLineEdit,
                               QSpinBox, QFormLayout, QComboBox)
+from PyQt6.QtCore import pyqtSignal
 
 
 class RoutinePanel(QWidget):
     """例程控制面板"""
+
+    # 业务日志转发(msg, level): 面板不再内置日志窗口，统一由主窗口业务日志呈现
+    business_log = pyqtSignal(str, str)
 
     def __init__(self, uds_client=None, parent=None):
         super().__init__(parent)
@@ -68,17 +72,11 @@ class RoutinePanel(QWidget):
         btn_layout.addStretch()
         layout.addLayout(btn_layout)
 
-        # 日志
-        self._log_text = QTextEdit()
-        self._log_text.setReadOnly(True)
-        self._log_text.setMaximumHeight(200)
-        layout.addWidget(self._log_text)
-
         layout.addStretch()
 
     def _send_routine(self):
         if not self._uds_client:
-            self._log("未连接UDS客户端")
+            self._log("未连接UDS客户端", "WARNING")
             return
 
         sub_funcs = [0x01, 0x02, 0x03]
@@ -90,15 +88,14 @@ class RoutinePanel(QWidget):
 
         resp = self._uds_client.routine_control(sub_func, routine_id, data)
         if resp and resp[0] == 0x71:
-            self._log(f"例程控制 0x{routine_id:04X} 成功, 响应: {resp.hex(' ')}")
+            self._log(f"例程控制 0x{routine_id:04X} 成功, 响应: {resp.hex(' ')}",
+                      "SUCCESS")
         else:
-            self._log(f"例程控制 0x{routine_id:04X} 失败")
+            self._log(f"例程控制 0x{routine_id:04X} 失败", "ERROR")
 
     def _quick_routine(self, routine_id: int):
         self._routine_id_spin.setValue(routine_id)
         self._send_routine()
 
-    def _log(self, msg: str):
-        import time
-        ts = time.strftime("%H:%M:%S")
-        self._log_text.append(f"[{ts}] {msg}")
+    def _log(self, msg: str, level: str = "INFO"):
+        self.business_log.emit(msg, level)

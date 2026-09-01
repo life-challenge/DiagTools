@@ -219,7 +219,11 @@ class VirtualEcuSimulator:
         return bytes([0x77])
 
     def _handle_tester_present(self, data: bytes) -> bytes:
-        return bytes([0x7E, 0x00])
+        sub_func = data[1] if len(data) > 1 else 0x00
+        if sub_func & 0x80:
+            # 抑制正响应位: ECU不应回复（回空即不发帧）
+            return b""
+        return bytes([0x7E, sub_func & 0x7F])
 
     def _handle_control_dtc_setting(self, data: bytes) -> bytes:
         sub_func = data[1] if len(data) > 1 else 0x01
@@ -248,6 +252,10 @@ class VirtualCanInterface(CanInterfaceBase):
         self._rx_count = 0
         self._req_id = 0x7E0   # 默认请求地址
         self._resp_id = 0x7E8  # 默认响应地址
+        # 多帧请求接收重组状态（写入DID等>7字节请求）
+        self._req_buf = None       # bytearray，None表示当前无进行中的多帧接收
+        self._req_total = 0
+        self._req_seq = 1
 
     def connect(self, config: dict) -> bool:
         with self._lock:
@@ -261,6 +269,9 @@ class VirtualCanInterface(CanInterfaceBase):
             self._running = True
             self._tx_count = 0
             self._rx_count = 0
+            self._req_buf = None
+            self._req_total = 0
+            self._req_seq = 1
             return True
 
     def disconnect(self) -> None:
@@ -291,13 +302,39 @@ class VirtualCanInterface(CanInterfaceBase):
         # 如果是发送到请求地址或功能寻址地址(0x7DF)，模拟ECU响应
         # （功能寻址是刷写刷前准备/刷后恢复步骤的发送方式）
         if msg.can_id in (self._req_id, 0x7DF) and msg.data:
-            # 检查是否为流控帧（FC）—— TP层协议帧，不是UDS请求
             frame_type = msg.data[0] & 0xF0
             if frame_type == 0x30:
-                # 流控帧：不处理为UDS请求，直接返回
+                # 流控帧：TP层协议帧，不是UDS请求
                 return True
-
-            # 从TP帧中提取UDS数据
+            if frame_type == 0x10:
+                # 首帧: 开始多帧接收，回流控帧(CTS, BS=0不限, STmin=0)
+                self._req_total = ((msg.data[0] & 0x0F) << 8) | msg.data[1]
+                self._req_buf = bytearray(msg.data[2:8])
+                self._req_seq = 1
+                fc = CanMessage(
+                    can_id=self._resp_id,
+                    data=bytes([0x30, 0x00, 0x00, 0, 0, 0, 0, 0]),
+                    dlc=8, msg_type=CanMessageType.STANDARD,
+                    direction=CanDirection.RX, timestamp=time.time(), channel=0)
+                self._rx_queue.put(fc)
+                return True
+            if frame_type == 0x20:
+                # 连续帧: 按序重组，收满后交模拟器处理
+                seq = msg.data[0] & 0x0F
+                if (self._req_buf is not None
+                        and seq == (self._req_seq & 0x0F)):
+                    remaining = self._req_total - len(self._req_buf)
+                    self._req_buf.extend(msg.data[1:1 + min(7, remaining)])
+                    self._req_seq = (self._req_seq + 1) & 0x0F
+                    if len(self._req_buf) >= self._req_total:
+                        uds_data = bytes(self._req_buf[:self._req_total])
+                        self._req_buf = None
+                        response_data = self._ecu_simulator.process_request(
+                            uds_data)
+                        if response_data:
+                            self._queue_tp_response(response_data)
+                return True
+            # 单帧: 直接提取UDS数据处理
             uds_data = self._extract_uds_from_tp(msg.data)
             if uds_data:
                 response_data = self._ecu_simulator.process_request(uds_data)
@@ -364,15 +401,14 @@ class VirtualCanInterface(CanInterfaceBase):
                 seq = (seq + 1) & 0x0F
 
     def _extract_uds_from_tp(self, tp_data: bytes) -> bytes:
-        """从TP帧中提取UDS数据（支持单帧）"""
+        """从TP单帧中提取UDS数据（多帧由send()中的重组状态机处理）"""
         if not tp_data:
             return b""
         frame_type = tp_data[0] & 0xF0
         if frame_type == 0x00:  # 单帧
             sf_length = tp_data[0] & 0x0F
             return bytes(tp_data[1:1 + sf_length])
-        # 对于多帧，只返回首帧中的数据部分（简化处理）
-        return bytes(tp_data[2:8])
+        return b""
 
     def _wrap_tp_single_frame(self, uds_data: bytes) -> bytes:
         """将UDS响应包装为TP单帧"""

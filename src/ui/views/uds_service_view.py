@@ -6,7 +6,7 @@
 
 import time
 from PyQt6.QtWidgets import (
-    QWidget, QVBoxLayout, QHBoxLayout, QLabel, QPushButton, QComboBox,
+    QWidget, QVBoxLayout, QHBoxLayout, QPushButton, QComboBox,
     QLineEdit, QTableWidget, QTableWidgetItem, QHeaderView, QGroupBox,
     QFormLayout, QSplitter
 )
@@ -53,6 +53,27 @@ _NRC_NAMES = {
 
 _MONO = QFont("Consolas", 10)
 
+# 各服务的参数填写提示（服务切换时刷新，避免残留上一服务的参数）
+_PARAM_HINTS = {
+    0x10: "子功能, 如 03(扩展会话)/02(编程会话)",
+    0x11: "子功能, 如 01(硬复位)/03(软复位)",
+    0x14: "DTC组(3字节), 如 FF FF FF(清除全部)",
+    0x19: "子功能+参数, 如 02 FF FF FF(按状态读DTC)",
+    0x22: "DID(2字节), 如 F1 90",
+    0x23: "地址+字节数, 如 00 00 00 08 01",
+    0x27: "子功能, 如 01(发种子)/02(发密钥)",
+    0x28: "子功能+通信类型, 如 00 01",
+    0x2E: "DID(2字节)+数据, 如 F1 90 31 32",
+    0x2F: "DID(2字节)+控制+状态, 如 F1 90 03 00",
+    0x31: "子功能+例程ID(2字节), 如 01 02 03",
+    0x34: "地址+字节数+格式, 如 00 00 00 08 01 10",
+    0x35: "地址+字节数+格式, 如 00 00 00 08 01 10",
+    0x36: "块计数器+数据, 如 01 AA BB CC",
+    0x37: "校验等附加数据, 可留空",
+    0x3E: "子功能, 如 80(抑制正响应)",
+    0x85: "子功能, 如 01(开DTC)/02(关DTC)",
+}
+
 
 class UdsServiceView(QWidget):
     """UDS服务手动执行 + Timing统计"""
@@ -87,32 +108,23 @@ class UdsServiceView(QWidget):
         svc_row.addWidget(self._service_combo)
         svc_row.addStretch()
         form.addRow("服务:", svc_row)
+        self._service_combo.currentIndexChanged.connect(
+            self._on_service_changed)
 
         param_row = QHBoxLayout()
         self._param_edit = QLineEdit()
-        self._param_edit.setPlaceholderText("参数(不含SID), 如 22服务输入 F1 90; 留空表示仅发SID")
+        self._param_edit.setPlaceholderText(
+            "参数(不含SID), 留空表示仅发SID")
         self._param_edit.setFont(_MONO)
+        self._param_edit.textChanged.connect(self._update_preview)
         param_row.addWidget(self._param_edit)
         self._send_btn = QPushButton("发送")
         self._send_btn.setFixedWidth(80)
         self._send_btn.clicked.connect(self._send)
         param_row.addWidget(self._send_btn)
         form.addRow("参数:", param_row)
-
-        self._lbl_request = QLabel("--")
-        self._lbl_request.setFont(_MONO)
-        self._lbl_request.setTextInteractionFlags(
-            Qt.TextInteractionFlag.TextSelectableByMouse)
-        form.addRow("Request:", self._lbl_request)
-
-        self._lbl_response = QLabel("--")
-        self._lbl_response.setFont(_MONO)
-        self._lbl_response.setTextInteractionFlags(
-            Qt.TextInteractionFlag.TextSelectableByMouse)
-        form.addRow("Response:", self._lbl_response)
-
-        self._lbl_status = QLabel("--")
-        form.addRow("状态:", self._lbl_status)
+        # 请求/响应/状态不再单独展示——统一由下方Timing历史表呈现，
+        # 输入时的实时预览悬浮在参数输入框tooltip上，避免同一报文显示两次
 
         splitter.addWidget(send_group)
 
@@ -131,8 +143,29 @@ class UdsServiceView(QWidget):
         tl.addWidget(self._table)
         splitter.addWidget(timing_group)
 
-        splitter.setStretchFactor(0, 2)
-        splitter.setStretchFactor(1, 3)
+        splitter.setStretchFactor(0, 1)
+        splitter.setStretchFactor(1, 4)
+
+        self._on_service_changed()  # 初始化提示与预览
+
+    def _on_service_changed(self):
+        """服务切换: 清空残留参数并按当前服务刷新填写提示"""
+        sid = self._service_combo.currentData()
+        self._param_edit.setPlaceholderText(
+            f"参数(不含SID), {_PARAM_HINTS[sid]}"
+            if sid in _PARAM_HINTS else "参数(不含SID), 十六进制字节; 留空表示仅发SID")
+        self._param_edit.clear()
+        self._update_preview()
+
+    def _update_preview(self):
+        """随服务/参数输入实时预览将要发送的字节（tooltip悬浮显示）"""
+        req = self._build_request()
+        if req is None:
+            self._param_edit.setToolTip("参数HEX格式错误")
+            self._param_edit.setStyleSheet("border: 1px solid #F44336;")
+        else:
+            self._param_edit.setToolTip(f"将发送: {req.hex(' ').upper()}")
+            self._param_edit.setStyleSheet("")
 
     # ---------------- 发送 ----------------
 
@@ -150,27 +183,23 @@ class UdsServiceView(QWidget):
 
     def _send(self):
         req = self._build_request()
+        svc_text = self._service_combo.currentText()
         if req is None:
-            self._lbl_status.setText("参数HEX格式错误")
-            self._lbl_status.setStyleSheet("color: #F44336;")
+            # 结果统一在Timing历史中反馈，不再设独立状态标签
+            self._append_timing(svc_text, None, None, 0.0,
+                                False, "参数HEX格式错误")
             return
         if not self._uds_client:
-            self._lbl_status.setText("未连接")
-            self._lbl_status.setStyleSheet("color: #F44336;")
+            self._append_timing(svc_text, req, None, 0.0, False, "未连接")
             return
         if self._worker_thread is not None:
             return
 
-        self._lbl_request.setText(req.hex(" ").upper())
-        self._lbl_response.setText("...")
-        self._lbl_status.setText("发送中")
-        self._lbl_status.setStyleSheet("")
         self._send_btn.setEnabled(False)
 
         client = self._uds_client
         t0 = time.perf_counter()
         sid = req[0]
-        svc_text = self._service_combo.currentText()
 
         worker = UdsWorker(client.send_raw, req)
         thread = QThread(self)
@@ -182,10 +211,6 @@ class UdsServiceView(QWidget):
             self._worker = None
             self._worker_thread = None
             self._send_btn.setEnabled(True)
-            self._lbl_response.setText(resp.hex(" ").upper() if resp else "--")
-            self._lbl_status.setText(status_text)
-            self._lbl_status.setStyleSheet(
-                f"color: {COLOR_OK if status_ok else COLOR_ERR}; font-weight: bold;")
             self._append_timing(svc_text, req, resp, elapsed_ms, status_ok, status_text)
 
         def _on_done(resp):
@@ -210,14 +235,14 @@ class UdsServiceView(QWidget):
         self._worker_thread = thread
         thread.start()
 
-    def _append_timing(self, svc_text: str, req: bytes, resp, elapsed_ms: float,
+    def _append_timing(self, svc_text: str, req, resp, elapsed_ms: float,
                        ok: bool, status_text: str):
         row = self._table.rowCount()
         self._table.insertRow(row)
         cells = [
             time.strftime("%H:%M:%S"),
             svc_text,
-            req.hex(" ").upper(),
+            req.hex(" ").upper() if req else "--",
             resp.hex(" ").upper() if resp else "--",
             f"{elapsed_ms:.1f}",
             status_text,
