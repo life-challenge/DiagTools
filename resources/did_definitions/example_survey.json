@@ -1,0 +1,26 @@
+{
+  "_comment": "诊断调查表示例: 测试中心'调查表/ODX生成用例'可加载本文件，按声明的服务/子功能/DID自动生成全功能用例。services 两种写法: request直接给请求前缀，或 sid+sub_functions 展开；dids 与 DID 定义表格式一致。ODX导出JSON(comms字段)与.odx/.pdx/.cdd原始文件同样支持。",
+  "services": [
+    {"name": "DefaultSession", "request": "10 01", "description": "默认会话"},
+    {"name": "ProgrammingSession", "request": "10 02", "description": "编程会话"},
+    {"name": "ExtendedSession", "request": "10 03", "description": "扩展会话"},
+    {"name": "HardReset", "request": "11 01", "description": "硬复位(高危,生成后默认禁用)"},
+    {"name": "ClearAllDTC", "request": "14 FF FF FF", "description": "清除全部DTC(高危,生成后默认禁用)"},
+    {"name": "ReportNumberOfDTC", "request": "19 01", "description": "报告DTC数量"},
+    {"name": "ReadDTCByStatusMask", "request": "19 02 FF", "description": "按状态掩码读DTC"},
+    {"name": "ReportSupportedDTC", "request": "19 0A", "description": "报告支持的DTC列表"},
+    {"name": "SecuritySeed", "request": "27 01", "description": "请求安全种子(自动加扩展会话前置)"},
+    {"name": "CommNormalMode", "request": "28 00 03", "description": "通信控制-恢复(自动加扩展会话前置)"},
+    {"name": "TesterPresent", "request": "3E 00", "description": "TesterPresent正响应"},
+    {"name": "TesterPresentSuppress", "request": "3E 80", "description": "TesterPresent抑制(期望无响应)"},
+    {"name": "ChecksumCheck", "request": "31 01 02 02", "description": "完整性校验例程(自动加扩展会话前置)"},
+    {"name": "ControlDTCSettingOff", "request": "85 02", "description": "关闭DTC设置(自动加扩展会话前置)"},
+    {"name": "ControlDTCSettingOn", "request": "85 01", "description": "开启DTC设置(自动加扩展会话前置)"}
+  ],
+  "dids": [
+    {"id": "0xF190", "name": "VIN", "description": "车辆识别号", "data_length": 17, "data_type": "ascii"},
+    {"id": "0xF187", "name": "SparePartNumber", "description": "备件号", "data_length": 10, "data_type": "ascii"},
+    {"id": "0xF191", "name": "ECU_Hardware_Number", "description": "ECU硬件号", "data_length": 10, "data_type": "ascii"},
+    {"id": "0xF195", "name": "ECU_Software_Version", "description": "ECU软件版本号", "data_length": 10, "data_type": "ascii"}
+  ]
+}

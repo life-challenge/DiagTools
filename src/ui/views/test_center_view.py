@@ -13,7 +13,7 @@ import time
 from PyQt6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QPushButton, QLabel,
     QTableWidget, QTableWidgetItem, QHeaderView, QAbstractItemView,
-    QFileDialog, QTextEdit
+    QFileDialog, QTextEdit, QMenu
 )
 from PyQt6.QtCore import Qt, QThread, pyqtSignal
 from PyQt6.QtGui import QColor
@@ -272,11 +272,12 @@ class TestCenterView(QWidget):
         btn_load.setToolTip("加载 resources/sequences 下的JSON序列文件作为测试用例")
         btn_load.clicked.connect(self._load_sequence)
         bar.addWidget(btn_load)
-        btn_did = QPushButton("生成DID用例")
+        btn_did = QPushButton("调查表/ODX生成用例")
         btn_did.setToolTip(
-            "从DID定义表（诊断调查表JSON）生成用例: 表中每个DID一条独立读取用例\n"
-            "(22 <DID> → 期望正响应 62 <DID> 前缀)，重复生成时替换旧的DID-组用例")
-        btn_did.clicked.connect(self._generate_did_cases)
+            "从诊断调查表JSON（dids/services）或 ODX/PDX/CDD 解析服务、子功能、DID，\n"
+            "自动生成全功能用例: 每个声明的服务前缀/DID一条独立用例\n"
+            "高危服务（ECU复位/清DTC）默认禁用，确认后在表格里手动启用")
+        btn_did.clicked.connect(self._generate_cases)
         bar.addWidget(btn_did)
         btn_run_all = QPushButton("运行全部")
         btn_run_all.setObjectName("btn_primary")
@@ -307,6 +308,9 @@ class TestCenterView(QWidget):
             QAbstractItemView.EditTrigger.NoEditTriggers)
         self._table.setSelectionBehavior(
             QAbstractItemView.SelectionBehavior.SelectRows)
+        # 右键菜单: 启用/禁用用例（高危生成用例默认禁用）
+        self._table.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+        self._table.customContextMenuRequested.connect(self._case_context_menu)
         layout.addWidget(self._table, 1)
 
         # ---- 日志 ----
@@ -320,16 +324,42 @@ class TestCenterView(QWidget):
     def _refresh_table(self):
         self._table.setRowCount(len(self._cases))
         for row, seq in enumerate(self._cases):
-            for col, text in ((0, seq.name), (1, seq.description),
+            name = seq.name
+            if self._case_disabled(seq):
+                name += "  [已禁用]"
+            for col, text in ((0, name), (1, seq.description),
                               (2, str(len(seq.steps)))):
                 it = QTableWidgetItem(text)
                 it.setFlags(it.flags() & ~Qt.ItemFlag.ItemIsEditable)
+                if col == 0 and self._case_disabled(seq):
+                    it.setForeground(QColor("#888888"))
                 self._table.setItem(row, col, it)
             for col in (3, 4, 5):
                 it = QTableWidgetItem("--" if col == 3 else "")
                 it.setFlags(it.flags() & ~Qt.ItemFlag.ItemIsEditable)
                 self._table.setItem(row, col, it)
         self._lbl_summary.setText(f"{len(self._cases)} 个测试用例")
+
+    @staticmethod
+    def _case_disabled(seq) -> bool:
+        """用例是否禁用（主步骤全部enabled=False，如高危用例默认态）"""
+        return bool(seq.steps) and not any(s.enabled for s in seq.steps)
+
+    def _case_context_menu(self, pos):
+        """右键菜单: 启用/禁用用例（高危生成用例默认禁用，确认后启用）"""
+        row = self._table.rowAt(pos.y())
+        if row < 0 or row >= len(self._cases):
+            return
+        seq = self._cases[row]
+        disabled = self._case_disabled(seq)
+        menu = QMenu(self)
+        act = menu.addAction("启用用例" if disabled else "禁用用例")
+        if menu.exec(self._table.viewport().mapToGlobal(pos)) != act:
+            return
+        for s in seq.steps:
+            s.enabled = disabled  # 切换: 禁用态→全部启用, 启用态→全部禁用
+        self._refresh_table()
+        self._log(f"用例已{'启用' if disabled else '禁用'}: {seq.name}")
 
     def _load_sequence(self):
         start_dir = get_resource_path("sequences")
@@ -345,41 +375,38 @@ class TestCenterView(QWidget):
         self._refresh_table()
         self._log(f"已加载测试序列: {seq.name}")
 
-    def _generate_did_cases(self):
-        """从DID定义表（诊断调查表）生成读取用例: 每个DID一条独立用例
+    def _generate_cases(self):
+        """从调查表/ODX生成全功能用例（配置驱动）
 
-        用例结构: 22 <DID> → 期望响应前缀 62 <DID>（正响应+DID回显，
-        数据内容不做断言——运行时值随时变化）。重复生成时替换旧的
-        DID-组用例，避免重复堆积。
+        支持: 调查表JSON（dids+services）、ODX导出JSON（comms）、
+        ODX/PDX/CDD原始文件。生成 SVC-组（服务/子功能）与 DID-组，
+        重复生成时整组替换避免堆积。
         """
         start_dir = get_resource_path("did_definitions")
         filepath, _ = QFileDialog.getOpenFileName(
-            self, "选择DID定义表（诊断调查表）", start_dir,
-            "JSON Files (*.json)")
+            self, "选择诊断调查表 / ODX 文件", start_dir,
+            "调查表/ODX (*.json *.odx *.pdx *.cdd);;所有文件 (*)")
         if not filepath:
             return
-        from src.business.did_manager import DidManager
-        mgr = DidManager()
-        count = mgr.load_definitions_from_json(filepath)
-        if not count:
-            self._log(f"DID定义表加载失败或为空: {filepath}")
+        from src.business.conformance_generator import generate_from_file
+        report = generate_from_file(filepath)
+        if not report.sequences:
+            self._log(f"未生成任何用例: {os.path.basename(filepath)}"
+                      + (f"（跳过 {len(report.skipped)} 条）" if report.skipped else ""))
             return
-        # 移除旧的DID-组用例（重新生成替换）
-        self._cases = [c for c in self._cases if not c.name.startswith("DID-")]
-        for did_id, defn in sorted(mgr.definitions.items()):
-            desc = defn.description or defn.name
-            seq = UdsSequence(
-                f"DID-{did_id:04X} {defn.name}",
-                f"读取 {desc}（22 {did_id:04X} → 62 {did_id:04X}+数据）")
-            did_bytes = did_id.to_bytes(2, "big")
-            seq.steps.append(SequenceStep(
-                f"读取 {defn.name}",
-                bytes([0x22]) + did_bytes,
-                expected_response=bytes([0x62]) + did_bytes))
-            self._cases.append(seq)
+        # 替换旧的生成组（SVC-/DID-前缀），保留内置与手动加载的用例
+        self._cases = [c for c in self._cases
+                       if not c.name.lstrip("⚠").startswith(("SVC-", "DID-"))]
+        self._cases.extend(report.sequences)
         self._refresh_table()
-        self._log(f"已按定义表生成 {count} 条DID读取用例（DID-组）: "
-                  f"{os.path.basename(filepath)}")
+        self._log(f"[{os.path.basename(filepath)}] {report.summary()}")
+        for name, reason in report.skipped[:5]:
+            self._log(f"  跳过 {name}: {reason}")
+        if len(report.skipped) > 5:
+            self._log(f"  ...共跳过 {len(report.skipped)} 条")
+        if report.dangerous:
+            self._log(f"  ⚠ {report.dangerous} 条高危用例（ECU复位/清DTC）默认禁用，"
+                      "右键用例可启用/禁用")
 
     # ---------------- 执行 ----------------
 
@@ -400,6 +427,17 @@ class TestCenterView(QWidget):
         if not self._uds_client:
             self._log("未连接UDS，无法执行测试")
             return
+        # 过滤禁用用例（高危默认禁用，右键启用后才参与执行）
+        disabled_rows = [r for r in rows if self._case_disabled(self._cases[r])]
+        for r in disabled_rows:
+            self._table.item(r, 3).setText("已禁用")
+            self._table.item(r, 3).setForeground(QColor("#888888"))
+        rows = [r for r in rows if r not in disabled_rows]
+        if not rows:
+            self._log("所选用例均已禁用（右键可启用）")
+            return
+        if disabled_rows:
+            self._log(f"跳过 {len(disabled_rows)} 条禁用用例")
         client = self._uds_client
         manager = self._seq_manager
         cases = [(r, self._cases[r]) for r in rows]

@@ -3,6 +3,25 @@
 本文件记录 DiagTools 各版本的重要变更，格式遵循
 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)。
 
+## [1.10.0] - 2026-09-02
+
+### 新增
+- **调查表/ODX驱动的全功能用例生成**（src/business/conformance_generator.py）:
+  - 测试中心"调查表/ODX生成用例"按钮，支持三类输入: 诊断调查表JSON
+    （services+dids）、ODX导出JSON（comms）、ODX/PDX/CDD原始文件
+  - 服务/子功能用例（SVC-组）: 每个声明的请求前缀一条独立用例，
+    期望正响应按 ISO 14229-1 回显规则表生成（会话/复位等回显子功能、
+    DID服务回显2字节、例程回显子功能+例程ID、清DTC不回显）
+  - 子功能抑制位(0x80)自动识别为"期望无响应"用例（仅限含子功能服务，
+    避免 14 FF FF FF 的DTC组误判）
+  - 非默认会话服务（27/28/31/85/14）自动加前置扩展会话+清理还原
+  - 高危服务（11复位/14清DTC）生成但默认禁用（⚠标记+表格置灰[已禁用]），
+    右键菜单启用/禁用，运行时自动跳过禁用用例
+  - 27偶数等级(发密钥)与2E/34-37等需运行时参数的服务跳过并记录原因
+  - 调查表 services 支持两种写法: request直接给前缀 / sid+sub_functions展开
+- **示例调查表** resources/did_definitions/example_survey.json
+  （15服务+4DID，含高危/抑制/会话依赖各类场景演示）
+
 ## [1.9.0] - 2026-09-02
 
 ### 新增
