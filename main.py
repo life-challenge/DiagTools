@@ -11,11 +11,13 @@ if project_root not in sys.path:
 
 from PyQt6.QtWidgets import QApplication, QMessageBox
 from PyQt6.QtCore import Qt, qInstallMessageHandler, QtMsgType
+from PyQt6.QtGui import QIcon
 
 import src
 from src.ui.main_window import MainWindow
 from src.log.log_manager import LogManager
 from src.utils.config_manager import ConfigManager
+from src.utils.paths import get_resource_path
 
 
 def _install_crash_handlers(logger):
@@ -76,6 +78,14 @@ def main():
     app.setApplicationName("DiagTools")
     app.setOrganizationName("DiagTools")
     app.setApplicationVersion(src.__version__)
+
+    # 应用图标（诊断仪主题: OBD接头+总线波形）——任务栏/窗口/关于框统一；
+    # 源码运行与打包运行都经 get_resource_path 解析（冻结时资源在exe旁）
+    icon_path = get_resource_path("icons", "diagtools.ico")
+    if os.path.isfile(icon_path):
+        app.setWindowIcon(QIcon(icon_path))
+    else:
+        app_logger.warning("应用图标未找到: %s", icon_path)
 
     # 创建主窗口
     window = MainWindow()

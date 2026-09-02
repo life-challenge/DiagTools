@@ -3,6 +3,14 @@
 本文件记录 DiagTools 各版本的重要变更，格式遵循
 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)。
 
+## [1.8.2] - 2026-09-02
+
+### 新增
+- **诊断仪主题应用图标**: OBD接头+总线波形扁平风图标（深色底/亮黄主体），
+  多尺寸ICO（16~256px）替换原默认图标；main.py 设置 setWindowIcon，
+  源码运行与打包运行的任务栏/窗口/关于框统一显示；
+  另存 resources/icons/diagtools.png（256px）供文档用途
+
 ## [1.8.1] - 2026-09-02
 
 ### 修复
