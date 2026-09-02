@@ -3,6 +3,18 @@
 本文件记录 DiagTools 各版本的重要变更，格式遵循
 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)。
 
+## [1.9.0] - 2026-09-02
+
+### 新增
+- **测试中心 DID 定义表驱动用例生成**（诊断调查表覆盖）:
+  - "生成DID用例"按钮选择 DID 定义表 JSON（默认 resources/did_definitions），
+    表中每个 DID 自动生成一条独立读取用例（DID-组: 22 <DID> → 期望 62 <DID> 前缀，
+    数据内容不断言——运行时值随时变化）
+  - 重复生成时替换旧 DID-组用例，避免堆积；复用 DidManager 解析
+    （支持 {"dids": [...]} 格式与缩放/单位/数据类型字段）
+- 应用名统一为 DiagTools: 窗口标题"DiagTools - CAN/DoIP UDS 诊断仪"、
+  启动日志/关于框同步（原硬编码"ECU Diagnostic Studio V2.1"已过期）
+
 ## [1.8.2] - 2026-09-02
 
 ### 新增

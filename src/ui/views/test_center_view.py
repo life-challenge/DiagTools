@@ -272,6 +272,12 @@ class TestCenterView(QWidget):
         btn_load.setToolTip("加载 resources/sequences 下的JSON序列文件作为测试用例")
         btn_load.clicked.connect(self._load_sequence)
         bar.addWidget(btn_load)
+        btn_did = QPushButton("生成DID用例")
+        btn_did.setToolTip(
+            "从DID定义表（诊断调查表JSON）生成用例: 表中每个DID一条独立读取用例\n"
+            "(22 <DID> → 期望正响应 62 <DID> 前缀)，重复生成时替换旧的DID-组用例")
+        btn_did.clicked.connect(self._generate_did_cases)
+        bar.addWidget(btn_did)
         btn_run_all = QPushButton("运行全部")
         btn_run_all.setObjectName("btn_primary")
         btn_run_all.clicked.connect(self._run_all)
@@ -338,6 +344,42 @@ class TestCenterView(QWidget):
         self._cases.append(seq)
         self._refresh_table()
         self._log(f"已加载测试序列: {seq.name}")
+
+    def _generate_did_cases(self):
+        """从DID定义表（诊断调查表）生成读取用例: 每个DID一条独立用例
+
+        用例结构: 22 <DID> → 期望响应前缀 62 <DID>（正响应+DID回显，
+        数据内容不做断言——运行时值随时变化）。重复生成时替换旧的
+        DID-组用例，避免重复堆积。
+        """
+        start_dir = get_resource_path("did_definitions")
+        filepath, _ = QFileDialog.getOpenFileName(
+            self, "选择DID定义表（诊断调查表）", start_dir,
+            "JSON Files (*.json)")
+        if not filepath:
+            return
+        from src.business.did_manager import DidManager
+        mgr = DidManager()
+        count = mgr.load_definitions_from_json(filepath)
+        if not count:
+            self._log(f"DID定义表加载失败或为空: {filepath}")
+            return
+        # 移除旧的DID-组用例（重新生成替换）
+        self._cases = [c for c in self._cases if not c.name.startswith("DID-")]
+        for did_id, defn in sorted(mgr.definitions.items()):
+            desc = defn.description or defn.name
+            seq = UdsSequence(
+                f"DID-{did_id:04X} {defn.name}",
+                f"读取 {desc}（22 {did_id:04X} → 62 {did_id:04X}+数据）")
+            did_bytes = did_id.to_bytes(2, "big")
+            seq.steps.append(SequenceStep(
+                f"读取 {defn.name}",
+                bytes([0x22]) + did_bytes,
+                expected_response=bytes([0x62]) + did_bytes))
+            self._cases.append(seq)
+        self._refresh_table()
+        self._log(f"已按定义表生成 {count} 条DID读取用例（DID-组）: "
+                  f"{os.path.basename(filepath)}")
 
     # ---------------- 执行 ----------------
 

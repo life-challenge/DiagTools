@@ -85,13 +85,13 @@ class MainWindow(QMainWindow):
         # 启动时恢复上次选择的ECU
         self._restore_current_ecu()
         self._log_dock.log_business(
-            f"ECU Diagnostic Studio V2.1 启动, 当前ECU: "
+            f"DiagTools v{src.__version__} 启动, 当前ECU: "
             f"{self._current_ecu.name if self._current_ecu else '--'}")
 
     # ---------------- UI骨架 ----------------
 
     def _init_ui(self):
-        self.setWindowTitle("ECU Diagnostic Studio - CAN UDS 诊断仪")
+        self.setWindowTitle("DiagTools - CAN/DoIP UDS 诊断仪")
         # 最小尺寸需适配小屏幕（笔记本可用区可低至~1366x688），
         # 过大的硬性最小值会导致窗口无法缩小、底部内容永久在屏幕外
         self.setMinimumSize(900, 600)
@@ -1626,9 +1626,9 @@ class MainWindow(QMainWindow):
 
     def _on_about(self):
         QMessageBox.about(
-            self, "关于 ECU Diagnostic Studio",
-            "<h2>ECU Diagnostic Studio</h2>"
-            f"<p>版本: {src.__version__}</p>"
+            self, "关于 DiagTools",
+            "<h2>DiagTools</h2>"
+            f"<p>CAN/DoIP UDS 诊断仪 · 版本: {src.__version__}</p>"
             "<p>配置驱动的ECU工程诊断平台: 诊断 / 刷写 / 标定 / 测试 / Trace</p>"
             "<p>技术栈: Python + PyQt6 + python-can</p>"
         )
