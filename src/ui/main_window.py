@@ -931,6 +931,8 @@ class MainWindow(QMainWindow):
                 if ecu is not None:
                     self._ecu_online.add((ecu.tx_id, ecu.rx_id))
                     self._refresh_ecu_icons()
+                # 自检通过后自动补全车辆信息（VIN）
+                self._auto_fill_vin()
             else:
                 self._link_check_fail()
 
@@ -939,6 +941,40 @@ class MainWindow(QMainWindow):
 
         self._start_worker(_check, (), _on_ok, _on_err,
                            "_link_worker", "_link_thread")
+
+    def _auto_fill_vin(self):
+        """自检通过后自动读VIN（22 F190）回填项目树"车辆信息"
+
+        仅当前VIN为空/"--"时回填，不覆盖用户手动编辑的值；
+        读取失败静默忽略（不影响主流程）。车型无标准DID，
+        仍需右键"编辑车型"手动设置。
+        """
+        cur = (self._config.get("project.vin", "") or "").strip()
+        if cur and cur != "--":
+            return
+        if self._uds_client is None:
+            return
+        client = self._uds_client
+
+        def _read():
+            return client.read_data_by_identifier(0xF190)
+
+        def _on_done(resp):
+            if not resp or len(resp) < 4 or resp[0] != 0x62:
+                return
+            vin = resp[3:].decode("ascii", errors="ignore").strip("\x00 \t\r\n")
+            if not vin:
+                return
+            self._config.set("project.vin", vin)
+            self._build_project_tree()
+            self._refresh_overview_info()
+            self._log_dock.log_business(f"自动读取车辆VIN: {vin}", "SUCCESS")
+
+        def _on_err(_msg):
+            pass  # VIN读取失败静默，不打扰用户
+
+        self._start_worker(_read, (), _on_done, _on_err,
+                           "_vin_worker", "_vin_thread")
 
     def _link_check_fail(self):
         ecu_name = self._current_ecu.name if self._current_ecu else "--"
@@ -966,14 +1002,30 @@ class MainWindow(QMainWindow):
             "PCAN设备指示灯", "WARNING")
 
     def _on_can_message(self, direction: str, msg):
-        """CAN报文监听回调（可能在后台线程），转发到底部日志面板与报文分析工作区"""
-        desc = self._describe_frame(msg.data)
+        """报文监听回调（可能在后台线程），转发到底部日志面板与报文分析工作区
+
+        DoIP与CAN的描述策略不同: DoIP诊断消息携带的是裸UDS数据
+        （无ISO-TP头），若按TP解析会把 3E/3x 开头的保活帧误判为"流控帧"
+        """
+        if self._connection_panel.is_doip:
+            desc = self._describe_uds(msg.data)
+        else:
+            desc = self._describe_frame(msg.data)
         self._log_dock.add_frame(direction, msg.can_id, msg.data, desc)
         self._trace_view.add_frame(direction, msg.can_id, msg.data, desc)
 
     @staticmethod
+    def _describe_sid(sid: int) -> str:
+        """UDS SID描述（正/负响应与服务名）"""
+        if sid == 0x7F:
+            return "负响应"
+        if sid > 0x40:
+            return f"{UdsService.get_service_name(sid - 0x40)} - 正响应"
+        return UdsService.get_service_name(sid)
+
+    @staticmethod
     def _describe_frame(data: bytes) -> str:
-        """根据ISO-TP帧类型和UDS SID生成描述"""
+        """CAN帧描述: 根据ISO-TP帧类型和UDS SID生成"""
         if not data:
             return ""
         pci = data[0] & 0xF0
@@ -988,11 +1040,14 @@ class MainWindow(QMainWindow):
             sid = data[2]
         else:
             return ""
-        if sid == 0x7F:
-            return "负响应"
-        if sid > 0x40:
-            return f"{UdsService.get_service_name(sid - 0x40)} - 正响应"
-        return UdsService.get_service_name(sid)
+        return MainWindow._describe_sid(sid)
+
+    @staticmethod
+    def _describe_uds(data: bytes) -> str:
+        """DoIP帧描述: 数据为裸UDS（无ISO-TP头），首字节即SID"""
+        if not data:
+            return ""
+        return MainWindow._describe_sid(data[0])
 
     def _set_toolbar_connected(self, connected: bool):
         """工具栏启动/停止互补状态

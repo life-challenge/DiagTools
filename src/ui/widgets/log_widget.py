@@ -190,12 +190,17 @@ class LogWidget(QWidget):
         self.message_received.emit(entry)
 
     def set_doip_context(self, tester_addr: int, ecu_addr: int):
-        """设置DoIP会话逻辑地址（pcap导出时重建以太网帧用）"""
+        """设置DoIP会话逻辑地址（pcap导出时重建以太网帧用）；
+        ID列同时改为"逻辑地址"——DoIP下该列显示的是逻辑地址而非CAN ID"""
         self._doip_context = (tester_addr, ecu_addr)
+        self._table.setHorizontalHeaderItem(2, QTableWidgetItem("逻辑地址"))
+        self._filter_id.setToolTip("逻辑地址过滤: 单个(1000/0x1000)或范围(1000-0E80)")
 
     def clear_doip_context(self):
-        """清除DoIP上下文（断开连接时调用）"""
+        """清除DoIP上下文（断开连接时调用），ID列恢复CAN语义"""
         self._doip_context = None
+        self._table.setHorizontalHeaderItem(2, QTableWidgetItem("CAN ID"))
+        self._filter_id.setToolTip("CAN ID过滤: 单个(714/0x714)或范围(714-794)")
 
     def _on_entry_received(self, entry: LogEntry):
         """GUI线程中处理新条目"""

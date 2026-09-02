@@ -3,6 +3,20 @@
 本文件记录 DiagTools 各版本的重要变更，格式遵循
 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)。
 
+## [1.8.1] - 2026-09-02
+
+### 修复
+- **DoIP模式帧描述误判**: DoIP诊断消息携带裸UDS数据（无ISO-TP头），
+  原按TP解析把 3E 80 保活帧（首字节&0xF0=0x30）全部误报为"流控帧 (FC)"；
+  现按接口类型分流: DoIP→裸UDS解析（TesterPresent/正响应/负响应），
+  CAN→ISO-TP帧类型+SID解析
+- **DoIP模式ID列语义**: UDS/CAN Trace表头在DoIP连接时显示"逻辑地址"
+  （而非CAN ID），过滤框tooltip同步；断开恢复CAN语义
+
+### 新增
+- **VIN自动回填**: 连通性自检通过后自动读 22 F190 回填项目树"车辆信息→VIN"
+  （仅当VIN为空/"--"时，不覆盖手动值；失败静默）；车型无标准DID仍需右键手动设置
+
 ## [1.8.0] - 2026-09-01
 
 ### 新增
