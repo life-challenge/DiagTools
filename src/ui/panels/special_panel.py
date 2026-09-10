@@ -20,7 +20,7 @@ from PyQt6.QtCore import Qt, QThread
 
 from src.log.log_manager import get_log_manager
 from src.protocol.uds_services import (
-    UdsService, SERVICE_NAMES, NRC_CODES)
+    UdsService, NRC_CODES)
 from src.ui.async_uds import UdsWorker
 
 
@@ -179,7 +179,6 @@ class SpecialPanel(QWidget):
             self._result_view.setPlainText(
                 f"[{name}] 无响应（超时）")
             return
-        sid = resp[0] if resp else 0
         if UdsService.is_negative_response(resp):
             nrc = resp[2] if len(resp) > 2 else 0
             desc = NRC_CODES.get(nrc, "未知")
@@ -190,7 +189,6 @@ class SpecialPanel(QWidget):
             color = "#4CAF50"
             verdict = "正响应"
             self._logger.info("特殊功能[%s]执行成功", name)
-        req_sid = request[0] if request else 0
         self._result_view.setHtml(
             f"<b>[{name}]</b> <span style='color:{color}'>{verdict}</span><br>"
             f"请求: {request.hex(' ').upper()}<br>"

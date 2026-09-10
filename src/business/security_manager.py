@@ -15,7 +15,6 @@ import struct
 import importlib
 import importlib.util
 import ctypes
-import json
 import time
 from typing import Optional
 from src.log.log_manager import get_log_manager
@@ -31,7 +30,8 @@ class SecurityAlgorithmInfo:
 
     def __init__(self, name: str, description: str, level: int,
                  version: str = "1.0", author: str = "",
-                 file_path: str = "", is_dll: bool = False):
+                 file_path: str = "", is_dll: bool = False,
+                 any_level: bool = False):
         self.name = name
         self.description = description
         self.level = level
@@ -39,6 +39,8 @@ class SecurityAlgorithmInfo:
         self.author = author
         self.file_path = file_path
         self.is_dll = is_dll
+        # 等级无关（DLL的GenerateKeyEx接口level为入参，按实际请求等级计算）
+        self.any_level = any_level
         self.instance = None  # 算法实例（Python插件实例或_DllAlgorithm适配器）
 
     def __repr__(self):
@@ -65,7 +67,8 @@ class _DllAlgorithm:
         ]
         self._fn.restype = ctypes.c_int
 
-    def generate_key(self, seed: bytes) -> bytes:
+    def generate_key(self, seed: bytes, level: int = None) -> bytes:
+        # 简化接口无level入参，等级参数仅为接口对齐而忽略
         seed_buf = (ctypes.c_ubyte * len(seed))(*seed)
         key_buf = (ctypes.c_ubyte * self._KEY_BUF_SIZE)()
         key_len = ctypes.c_int(self._KEY_BUF_SIZE)
@@ -120,10 +123,10 @@ class _GenerateKeyExAlgorithm:
         ]
         self._fn.argtypes = argtypes
 
-    def _call_once(self, seed: bytes):
+    def _call_once(self, seed: bytes, level: int):
         key_buf = ctypes.create_string_buffer(self._KEY_BUF_SIZE)
         actual = ctypes.c_ulong(0)
-        args = [bytes(seed), len(seed), self._level, b"default"]
+        args = [bytes(seed), len(seed), level, b"default"]
         if self._variants[self._variant_idx]:
             args.append(b"")
         args += [key_buf, self._KEY_BUF_SIZE, ctypes.byref(actual)]
@@ -134,9 +137,12 @@ class _GenerateKeyExAlgorithm:
             raise RuntimeError(f"DLL返回的密钥长度无效: {actual.value}")
         return key_buf.raw[:actual.value]
 
-    def generate_key(self, seed: bytes) -> bytes:
+    def generate_key(self, seed: bytes, level: int = None) -> bytes:
+        # level为实际请求的安全等级（面板/刷写配置指定），
+        # 未指定时回退到加载时探测的声明等级
+        lvl = self._level if level is None else level
         try:
-            return self._call_once(seed)
+            return self._call_once(seed, lvl)
         except OSError:
             # access violation等: 常见于签名不匹配（如DLL无options参数），
             # 切换下一个候选签名重试；进程内调用崩溃风险由调用方承担，
@@ -147,7 +153,7 @@ class _GenerateKeyExAlgorithm:
                     "请确认该DLL的GenerateKeyEx函数原型。")
             self._variant_idx += 1
             self._apply_argtypes()
-            return self._call_once(seed)
+            return self._call_once(seed, lvl)
 
 
 class _BridgedAlgorithm:
@@ -157,8 +163,8 @@ class _BridgedAlgorithm:
         self._bridge = bridge
         self._handle = handle
 
-    def generate_key(self, seed: bytes) -> bytes:
-        return self._bridge.generate_key(self._handle, seed)
+    def generate_key(self, seed: bytes, level: int = None) -> bytes:
+        return self._bridge.generate_key(self._handle, seed, level)
 
 
 class SecurityManager:
@@ -366,11 +372,12 @@ class SecurityManager:
                 level=level,
                 file_path=file_path,
                 is_dll=True,
+                any_level=True,  # GenerateKeyEx的level为入参，不限定等级
             )
             info.instance = instance
             self._algorithms[info.level] = info
             self._logger.info(
-                f"加载DLL算法: {info.name} (Level={level}, 接口={fn_name}) from {file_path}")
+                f"加载DLL算法: {info.name} (任意等级, 接口={fn_name}) from {file_path}")
             return info
 
         except OSError as e:
@@ -410,11 +417,12 @@ class SecurityManager:
             level=level,
             file_path=file_path,
             is_dll=True,
+            any_level=True,  # GenerateKeyEx的level为入参，不限定等级
         )
         info.instance = _BridgedAlgorithm(self._bridge, handle)
         self._algorithms[info.level] = info
         self._logger.info(
-            f"桥接加载DLL算法: {info.name} (Level={level}, 接口={fn_name}) from {file_path}")
+            f"桥接加载DLL算法: {info.name} (任意等级, 接口={fn_name}) from {file_path}")
         return info
 
     def set_python32_path(self, path: str) -> bool:
@@ -489,29 +497,46 @@ class SecurityManager:
             return True
         return False
 
+    def get_algorithm(self, level: int) -> Optional[SecurityAlgorithmInfo]:
+        """查找等级对应的算法
+
+        精确等级匹配优先（Python插件按等级注册）；无精确匹配时回退到
+        等级无关的DLL算法——GenerateKeyEx接口的level本身是入参，
+        DLL按实际请求的等级计算密钥，不应在加载时绑定固定等级。
+        """
+        info = self._algorithms.get(level)
+        if info is not None:
+            return info
+        for algo in self._algorithms.values():
+            if algo.any_level:
+                return algo
+        return None
+
     def generate_key(self, level: int, seed: bytes) -> Optional[bytes]:
         """使用指定等级的算法计算密钥
 
         Args:
-            level: 安全等级
+            level: 安全等级（DLL算法按此等级透传给GenerateKeyEx计算）
             seed: ECU返回的种子
 
         Returns:
             计算得到的密钥，失败返回None
         """
-        if level not in self._algorithms:
-            self._logger.error(f"未加载Level {level}的安全算法")
+        info = self.get_algorithm(level)
+        if info is None:
+            self._logger.error(f"未加载可用于Level {level}的安全算法")
             return None
 
-        info = self._algorithms[level]
-
         try:
-            # 统一接口: Python插件实例和DLL适配器(_DllAlgorithm)都提供 generate_key(seed)
             if info.instance is None or not hasattr(info.instance, 'generate_key'):
                 self._logger.error(f"算法实例无效: Level {level}")
                 return None
 
-            key = info.instance.generate_key(seed)
+            # DLL适配器接收(seed, level)按请求等级计算；Python插件仅接收seed
+            if info.is_dll:
+                key = info.instance.generate_key(seed, level)
+            else:
+                key = info.instance.generate_key(seed)
             if not key:
                 self._logger.error(f"密钥计算返回空结果: Level {level}")
                 return None

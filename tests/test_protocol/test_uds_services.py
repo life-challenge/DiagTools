@@ -24,17 +24,21 @@ class TestUdsServiceEncode(unittest.TestCase):
         self.assertEqual(UdsService.encode_ecu_reset(0x01),
                          bytes([0x11, 0x01]))
 
-    def test_security_seed_odd_subfunction(self):
-        # Level 1 -> 0x01, Level 2 -> 0x03（奇数请求种子）
+    def test_security_seed_subfunction(self):
+        # level为实际子功能值（奇数）: 1/9 → 27 01/27 09
         self.assertEqual(UdsService.encode_security_access_request_seed(1),
                          bytes([0x27, 0x01]))
-        self.assertEqual(UdsService.encode_security_access_request_seed(2),
-                         bytes([0x27, 0x03]))
+        self.assertEqual(UdsService.encode_security_access_request_seed(9),
+                         bytes([0x27, 0x09]))
 
-    def test_security_key_even_subfunction(self):
+    def test_security_key_subfunction_pairs(self):
+        # 发送密钥子功能 = 请求种子等级+1（奇→偶）
         self.assertEqual(
             UdsService.encode_security_access_send_key(1, b"\xAA\xBB"),
             bytes([0x27, 0x02, 0xAA, 0xBB]))
+        self.assertEqual(
+            UdsService.encode_security_access_send_key(9, b"\xAA\xBB"),
+            bytes([0x27, 0x0A, 0xAA, 0xBB]))
 
     def test_read_write_did(self):
         self.assertEqual(UdsService.encode_read_did(0xF190),

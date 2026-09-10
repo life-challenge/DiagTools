@@ -256,7 +256,7 @@ class SessionPanel(QWidget):
                     self.session_changed.emit(session_type)
                     self._maybe_hint_keepalive(session_type)
                 else:
-                    self._log(f"切换失败: 负响应或无响应")
+                    self._log("切换失败: 负响应或无响应")
             except Exception as e:
                 self._log(f"响应解析异常: {e}")
 
@@ -302,7 +302,7 @@ class SessionPanel(QWidget):
                 self.session_changed.emit(session_type)
                 self._maybe_hint_keepalive(session_type)
             else:
-                self._log(f"切换失败: 负响应或无响应")
+                self._log("切换失败: 负响应或无响应")
 
         def _handle_error(msg):
             self._switch_btn.setEnabled(True)

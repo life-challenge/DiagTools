@@ -4,8 +4,7 @@
 """
 
 from enum import IntEnum
-from typing import Optional
-from src.models.uds_message import UdsMessage, UdsMessageType, NRC_CODES
+from src.models.uds_message import NRC_CODES
 
 
 class ServiceID(IntEnum):
@@ -127,13 +126,17 @@ class UdsService:
 
     @staticmethod
     def encode_security_access_request_seed(level: int) -> bytes:
-        """编码安全访问请求种子 (奇数SID)"""
-        return bytes([0x27, level * 2 - 1])
+        """编码安全访问请求种子
+
+        level 为实际子功能值（奇数），如 1/9 → 27 01/27 09；
+        发送密钥自动使用偶数（level+1）。
+        """
+        return bytes([0x27, level])
 
     @staticmethod
     def encode_security_access_send_key(level: int, key: bytes) -> bytes:
-        """编码安全访问发送密钥 (偶数SID)"""
-        return bytes([0x27, level * 2]) + key
+        """编码安全访问发送密钥（偶数子功能 = 请求种子等级+1）"""
+        return bytes([0x27, level + 1]) + key
 
     @staticmethod
     def encode_read_did(did_id: int) -> bytes:

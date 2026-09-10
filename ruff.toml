@@ -1,0 +1,18 @@
+# ruff 配置：聚焦正确性规则（pyflakes + pycodestyle 错误级），
+# 默认全量规则集过于严苛，按需逐步引入。
+target-version = "py310"
+line-length = 100
+
+extend-exclude = ["build", "dist", "__pycache__"]
+
+[lint]
+select = ["E4", "E7", "E9", "F"]
+
+[lint.per-file-ignores]
+# main.py: 启动前先做32位桥接环境检查再导入应用模块（有意延迟导入）
+# plugins: 插件加载前需先注入 sys.path
+# tools/scripts: 独立脚本先解析参数/环境再导入
+"main.py" = ["E402"]
+"plugins/*" = ["E402"]
+"tools/*" = ["E402"]
+"scripts/*" = ["E402"]

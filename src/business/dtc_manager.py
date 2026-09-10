@@ -58,6 +58,12 @@ class DtcRecord:
         return ", ".join(active) if active else "无激活状态"
 
     @property
+    def status_bits_label(self) -> str:
+        """激活位号简写（如 'Bit4 Bit6'，详细含义见状态位区）"""
+        bits = [f"Bit{i}" for i in range(8) if self.status & (1 << i)]
+        return " ".join(bits) if bits else "无"
+
+    @property
     def is_confirmed(self) -> bool:
         """是否已确认DTC"""
         return bool(self.status & 0x08)
@@ -127,26 +133,41 @@ class DtcManager:
         return len(self._current_dtcs)
 
     def load_definitions(self, file_path: str) -> int:
-        """加载DTC定义文件（JSON格式）"""
+        """加载DTC定义文件（JSON格式: 纯列表或含dtcs键的对象）"""
         try:
             with open(file_path, 'r', encoding='utf-8') as f:
                 data = json.load(f)
 
-            count = 0
-            for item in data:
-                dtc_id = item.get("dtc_id", "")
-                if isinstance(dtc_id, str):
-                    dtc_id = int(dtc_id, 16)
-                desc = item.get("description", "")
-                self._dtc_definitions[dtc_id] = desc
-                count += 1
-
-            self._logger.info(f"加载了 {count} 个DTC定义")
-            return count
+            if isinstance(data, dict):
+                data = data.get("dtcs", [])
+            return self.load_definitions_from_list(data)
 
         except Exception as e:
             self._logger.error(f"加载DTC定义失败: {e}")
             return 0
+
+    def load_definitions_from_list(self, items: list) -> int:
+        """从DTC定义字典列表加载（dtc_id/description）"""
+        count = 0
+        for item in items:
+            dtc_id = item.get("dtc_id", "")
+            if isinstance(dtc_id, str):
+                dtc_id = int(dtc_id, 16)
+            desc = item.get("description", "")
+            self._dtc_definitions[dtc_id] = desc
+            count += 1
+
+        self._logger.info(f"加载了 {count} 个DTC定义")
+        return count
+
+    def get_definition(self, dtc_id: int) -> str:
+        """查询单个DTC的描述定义"""
+        return self._dtc_definitions.get(dtc_id, "")
+
+    def refresh_current_definitions(self):
+        """定义更新后回填当前记录描述（已读取的DTC立即显示名称）"""
+        for record in self._current_dtcs.values():
+            record.definition = self._dtc_definitions.get(record.dtc_id, "")
 
     def parse_read_dtc_response(self, response: bytes) -> list[DtcRecord]:
         """解析0x19读取DTC响应

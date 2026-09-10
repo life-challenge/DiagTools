@@ -3,12 +3,25 @@
 from PyQt6.QtWidgets import (QWidget, QVBoxLayout, QHBoxLayout, QGroupBox,
                               QLabel, QPushButton, QTableWidget, QTableWidgetItem,
                               QHeaderView, QComboBox, QFileDialog,
-                              QCheckBox, QProgressBar, QLineEdit, QInputDialog)
+                              QCheckBox, QLineEdit, QInputDialog,
+                              QGridLayout)
 from PyQt6.QtCore import Qt, pyqtSignal
 from PyQt6.QtGui import QColor, QFont
-from src.business.dtc_manager import DtcManager
+from src.business.dtc_manager import DtcManager, DTC_STATUS_BITS
 
 _MONO = QFont("Consolas", 10)
+
+# ISO 14229 DTC状态位中文含义（状态位区逐位解释）
+_DTC_BIT_LABELS = {
+    0: "当前失败",          # testFailed
+    1: "本周期失败",        # testFailedThisOperationCycle
+    2: "待定",              # pendingDtc
+    3: "已确认",            # confirmedDtc
+    4: "清除后未完成",      # testNotCompletedSinceLastClear
+    5: "清除后失败",        # testFailedSinceLastClear
+    6: "本周期未完成",      # testNotCompletedThisOperationCycle
+    7: "警告灯请求",        # warningIndicatorRequested
+}
 
 # 0x19子功能 → (是否需要状态掩码, 是否需要DTC号)
 _MODES = [
@@ -66,14 +79,52 @@ class DtcPanel(QWidget):
         self._read_dtcs()
 
     def import_definitions(self, filepath: str) -> int:
-        """程序化导入DTC定义（菜单/项目加载入口），返回导入数量"""
-        return self._dtc_manager.load_definitions(filepath)
+        """程序化导入DTC定义（菜单/项目加载入口），返回导入数量
+
+        支持DTC定义JSON列表、调查表JSON（含dtcs键）、OEM调查表xlsx；
+        导入后回填已读取记录的名称并刷新表格
+        """
+        import os
+        ext = os.path.splitext(filepath)[1].lower()
+        if ext in (".xlsx", ".xlsm"):
+            try:
+                from src.business.survey_xlsx_parser import parse_survey_xlsx
+                items = parse_survey_xlsx(filepath).get("dtcs", [])
+            except Exception as e:
+                self._log(f"调查表解析失败: {e}", "ERROR")
+                return 0
+            count = self._dtc_manager.load_definitions_from_list(items)
+        else:
+            count = self._dtc_manager.load_definitions(filepath)
+        if count:
+            self._dtc_manager.refresh_current_definitions()
+            records = list(self._dtc_manager.current_dtcs.values())
+            if records:
+                self._refresh_table(records)
+            self._log(f"加载了 {count} 个DTC定义: "
+                      f"{os.path.basename(filepath)}")
+        return count
+
+    def _load_definitions(self):
+        """本地加载定义入口: 支持DTC定义JSON/调查表xlsx"""
+        filepath, _ = QFileDialog.getOpenFileName(
+            self, "加载DTC定义", "",
+            "DTC定义/调查表 (*.json *.xlsx *.xlsm);;JSON Files (*.json);;"
+            "调查表Excel (*.xlsx *.xlsm)")
+        if filepath:
+            self.import_definitions(filepath)
 
     def _init_ui(self):
         layout = QVBoxLayout(self)
 
         # 工具栏
         toolbar = QHBoxLayout()
+        self._load_def_btn = QPushButton("加载定义")
+        self._load_def_btn.setToolTip(
+            "DTC定义JSON或OEM调查表xlsx（导入后名称列显示故障含义）")
+        self._load_def_btn.clicked.connect(self._load_definitions)
+        toolbar.addWidget(self._load_def_btn)
+
         toolbar.addWidget(QLabel("读取模式:"))
         self._mode_combo = QComboBox()
         for sub, label, _, _ in _MODES:
@@ -141,20 +192,33 @@ class DtcPanel(QWidget):
         self._table.setHorizontalHeaderLabels(
             ["DTC ID", "名称", "状态", "状态描述", "严重度", "出现次数"])
         header = self._table.horizontalHeader()
+        # 名称/状态描述两列共享弹性空间；其余列随内容自适应，
+        # 避免长定义挤压状态/严重度显示
+        header.setSectionResizeMode(1, QHeaderView.ResizeMode.Stretch)
         header.setSectionResizeMode(3, QHeaderView.ResizeMode.Stretch)
+        for col in (0, 2, 4, 5):
+            header.setSectionResizeMode(
+                col, QHeaderView.ResizeMode.ResizeToContents)
+        # 超长定义以省略号截断（完整内容见tooltip）
+        self._table.setTextElideMode(Qt.TextElideMode.ElideRight)
+        self._table.setWordWrap(False)
         self._table.setSelectionBehavior(
             QTableWidget.SelectionBehavior.SelectRows)
         layout.addWidget(self._table)
 
-        # DTC状态位可视化
+        # DTC状态位可视化（逐位中文含义，勾选状态即解释）
         status_group = QGroupBox("DTC状态位 (选中DTC)")
-        status_layout = QHBoxLayout()
+        status_layout = QGridLayout()
+        status_layout.setContentsMargins(8, 4, 8, 4)
+        status_layout.setHorizontalSpacing(16)
         self._status_bits = []
         for i in range(8):
-            cb = QCheckBox(f"Bit{i}")
+            cb = QCheckBox(f"Bit{i} {_DTC_BIT_LABELS[i]}")
+            cb.setToolTip(DTC_STATUS_BITS.get(i, ""))
             cb.setEnabled(False)
             self._status_bits.append(cb)
-            status_layout.addWidget(cb)
+            # 2行×4列布局，避免中文标签挤不下
+            status_layout.addWidget(cb, i // 4, i % 4)
         status_group.setLayout(status_layout)
         layout.addWidget(status_group)
         self._table.itemSelectionChanged.connect(self._on_selection_changed)
@@ -249,9 +313,16 @@ class DtcPanel(QWidget):
         self._table.setRowCount(len(records))
         for row, r in enumerate(records):
             self._table.setItem(row, 0, QTableWidgetItem(r.dtc_id_hex))
-            self._table.setItem(row, 1, QTableWidgetItem(r.definition))
+            name_item = QTableWidgetItem(r.definition or "--")
+            name_item.setToolTip(
+                (r.definition or "未加载定义（可用\"加载定义\"导入调查表）"))
+            self._table.setItem(row, 1, name_item)
             self._table.setItem(row, 2, QTableWidgetItem(f"0x{r.status:02X}"))
-            self._table.setItem(row, 3, QTableWidgetItem(r.status_description))
+            # 状态描述精简为激活位号，详细含义由下方状态位区逐位解释
+            bits_item = QTableWidgetItem(r.status_bits_label)
+            bits_item.setToolTip(r.status_description)
+            bits_item.setFont(_MONO)
+            self._table.setItem(row, 3, bits_item)
 
             sev_item = QTableWidgetItem(r.severity_level)
             if r.severity_level == "confirmed":

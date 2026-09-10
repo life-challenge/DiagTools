@@ -123,8 +123,8 @@ class LogDock(QWidget):
         self._tabs.addTab(self._can_trace, "CAN Trace")
         layout.addWidget(self._tabs, 1)
 
-        # CAN Trace新条目 -> 更新事件计数（GUI线程）
-        self._can_trace.message_received.connect(self._update_count)
+        # CAN Trace批量渲染完成 -> 更新事件计数（每批一次，避免洪泛时逐帧刷新QLabel）
+        self._can_trace.flushed.connect(self._update_count)
 
         # 页签切换 -> 路径标签跟随（初始也刷新一次）
         self._tabs.currentChanged.connect(lambda _i: self._refresh_log_path())
@@ -137,11 +137,13 @@ class LogDock(QWidget):
         """全部报文日志（状态栏计数数据源）"""
         return self._can_trace
 
-    def add_frame(self, direction: str, can_id: int, data: bytes, desc: str):
-        """CAN报文入口: CAN Trace记录全部，UDS Trace仅记录可解析帧"""
+    def add_frame(self, direction: str, can_id: int, data: bytes, desc: str,
+                  uds_msg: bytes = None, uds_desc: str = ""):
+        """CAN报文入口: CAN Trace记录全部原始帧（含TP分段帧/FC）；
+        uds_msg非None时UDS Trace记录重组后的完整UDS报文（14229会话层）"""
         self._can_trace.add_message(direction, can_id, data, desc)
-        if desc:
-            self._uds_trace.add_message(direction, can_id, data, desc)
+        if uds_msg is not None:
+            self._uds_trace.add_message(direction, can_id, uds_msg, uds_desc)
 
     def log_business(self, msg: str, level: str = "INFO"):
         """追加业务日志条目（§7: 时间 + 等级 + 内容，按等级着色）"""

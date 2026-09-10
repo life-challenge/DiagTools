@@ -304,6 +304,29 @@ class DoipTransportLayer:
         """兼容CanInterfaceBase.send：将报文data作为UDS请求发送（不等响应）"""
         return self.send_tp(msg.data)
 
+    def flush_rx(self):
+        """排空陈旧的接收数据（与CAN TransportLayer.flush_rx同构）
+
+        UdsClient在新事务发送前调用: 上一请求超时后ECU的迟到响应
+        若残留在这时的socket缓冲区，会被误当作新请求的响应消费，
+        发送前主动排空（半途截断的DoIP帧会被直接丢弃）。
+        """
+        self._rx_buffer.clear()
+        sock = self._sock
+        if sock is None:
+            return
+        try:
+            sock.setblocking(False)
+            while sock.recv(65536):
+                pass
+        except (BlockingIOError, socket.timeout, OSError):
+            pass
+        finally:
+            try:
+                sock.setblocking(True)
+            except OSError:
+                pass
+
     # ---------------- 报文监听（兼容CanInterfaceBase） ----------------
 
     def add_message_listener(self, callback: Callable[[str, CanMessage], None]):

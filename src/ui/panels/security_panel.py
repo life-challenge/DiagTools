@@ -165,7 +165,9 @@ class SecurityPanel(QWidget):
         self._algo_combo.clear()
         for level, info in self._security_manager.loaded_algorithms.items():
             type_tag = "[DLL]" if info.is_dll else "[PY]"
-            self._algo_combo.addItem(f"Level {level}: {info.name} {type_tag}", level)
+            # 等级无关的DLL: GenerateKeyEx的level为入参，任意等级均可用
+            level_text = "任意等级" if info.any_level else f"Level {level}"
+            self._algo_combo.addItem(f"{level_text}: {info.name} {type_tag}", level)
 
     def _load_algo_file(self):
         """从文件加载算法插件（支持.py和.dll）"""
@@ -196,10 +198,12 @@ class SecurityPanel(QWidget):
     def _load_selected_algo(self):
         self._refresh_algo_list()
         level = self._level_spin.value()
-        if level in self._security_manager.loaded_algorithms:
-            info = self._security_manager.loaded_algorithms[level]
+        # 等级无关的DLL算法对任意等级均可用（按请求等级透传计算）
+        info = self._security_manager.get_algorithm(level)
+        if info:
+            level_text = "任意等级" if info.any_level else f"Level {info.level}"
             self._algo_info.setText(
-                f"已加载: {info.name} | 版本: {info.version} | Level: {info.level}")
+                f"已加载: {info.name} | 版本: {info.version} | {level_text}")
             self._algo_info.setStyleSheet("color: #4CAF50;")
         else:
             self._algo_info.setText("未找到对应等级的算法")

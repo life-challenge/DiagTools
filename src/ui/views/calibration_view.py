@@ -7,8 +7,7 @@
 
 import os
 from PyQt6.QtWidgets import (
-    QWidget, QVBoxLayout, QHBoxLayout, QPushButton, QLabel, QLineEdit,
-    QFileDialog, QTableWidget, QTableWidgetItem, QHeaderView,
+    QWidget, QVBoxLayout, QHBoxLayout, QPushButton, QLabel, QFileDialog, QTableWidget, QTableWidgetItem, QHeaderView,
     QAbstractItemView, QTextEdit, QCheckBox
 )
 from PyQt6.QtCore import Qt

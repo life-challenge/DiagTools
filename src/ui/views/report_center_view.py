@@ -10,14 +10,12 @@
 
 import os
 import csv
-import json
 import time
 from PyQt6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel, QPushButton,
     QTableWidget, QTableWidgetItem, QHeaderView, QAbstractItemView,
     QFileDialog, QMessageBox
 )
-from PyQt6.QtCore import Qt
 from PyQt6.QtGui import QTextDocument, QPageSize
 from PyQt6.QtPrintSupport import QPrinter
 

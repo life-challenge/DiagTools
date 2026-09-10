@@ -9,7 +9,8 @@
 支持的命令:
   load:         {"dll_path": str, "stdcall": bool?}
                 -> {"ok": true, "handle": int, "fn_name": str, "level": int}
-  generate_key: {"handle": int, "seed_hex": str}
+  generate_key: {"handle": int, "seed_hex": str, "level": int?}
+                （level为实际请求的安全等级，缺省用加载时声明的等级）
                 -> {"ok": true, "key_hex": str}
   shutdown:     响应后退出进程
 
@@ -120,10 +121,12 @@ def _apply_keyex_argtypes(fn, entry):
     fn.argtypes = argtypes
 
 
-def _keyex_call_once(fn, entry, seed):
+def _keyex_call_once(fn, entry, seed, level=None):
+    # level为实际请求的安全等级（透传给GenerateKeyEx），缺省用声明的等级
+    lvl = entry["level"] if level is None else level
     key_buf = ctypes.create_string_buffer(KEY_BUF_SIZE)
     actual = ctypes.c_ulong(0)
-    args = [bytes(seed), len(seed), entry["level"], b"default"]
+    args = [bytes(seed), len(seed), lvl, b"default"]
     if entry["variants"][entry["variant_idx"]]:
         args.append(b"")
     args += [key_buf, KEY_BUF_SIZE, ctypes.byref(actual)]
@@ -148,6 +151,7 @@ def _cmd_generate_key(req):
         return {"ok": False, "error": "seed_hex不是有效的十六进制字符串"}
     if not seed:
         return {"ok": False, "error": "种子为空"}
+    level = req.get("level")  # 实际请求的安全等级（可缺省）
 
     fn = entry["fn"]
     if entry["kind"] == "simple":
@@ -165,14 +169,14 @@ def _cmd_generate_key(req):
         err = ""
         fallback = False
         try:
-            key, err = _keyex_call_once(fn, entry, seed)
+            key, err = _keyex_call_once(fn, entry, seed, level)
         except OSError:
             # access violation: 签名不匹配，切换无options的7参版本重试一次；
             # 子进程隔离，崩溃可接受；重试成功则告知主进程记住该签名。
             if entry["variant_idx"] + 1 < len(entry["variants"]):
                 entry["variant_idx"] += 1
                 _apply_keyex_argtypes(fn, entry)
-                key, err = _keyex_call_once(fn, entry, seed)
+                key, err = _keyex_call_once(fn, entry, seed, level)
                 fallback = key is not None
             else:
                 raise

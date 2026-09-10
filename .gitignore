@@ -34,3 +34,17 @@ plugins/**/*.dll
 Thumbs.db
 desktop.ini
 .DS_Store
+
+# ---------- 本地调试产物与临时脚本 ----------
+debug.log
+.coverage
+htmlcov/
+/_*.py
+/_*.txt
+*.orig
+
+# ---------- OEM 项目资产（调查表存档/用户序列，不公开） ----------
+resources/did_definitions/fb63_vcdm_survey.json
+resources/sequences/Read_F15B.json
+resources/sequences/test1.json
+resources/sequences/2E-F101_*.json

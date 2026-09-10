@@ -1,0 +1,12 @@
+# 覆盖率测量: 聚焦可无头测试的核心层（business/protocol/can_layer/utils），
+# UI（PyQt6 窗口/面板）依赖交互环境，暂不纳入覆盖率统计与阈值。
+[run]
+source = src
+omit =
+    src/ui/*
+    # 32位桥接子进程端脚本: 由 bridge_manager 派生独立进程执行，主进程无法采集
+    src/business/bridge_worker.py
+
+[report]
+fail_under = 50
+show_missing = True

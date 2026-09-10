@@ -9,7 +9,7 @@ import json
 from PyQt6.QtWidgets import (
     QDialog, QVBoxLayout, QHBoxLayout, QPushButton, QLabel, QLineEdit,
     QFileDialog, QTableWidget, QTableWidgetItem, QHeaderView,
-    QAbstractItemView, QDialogButtonBox
+    QAbstractItemView
 )
 from src.business.a2l_parser import A2lParser
 

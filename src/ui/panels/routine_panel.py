@@ -1,7 +1,7 @@
 """例程控制面板"""
 
 from PyQt6.QtWidgets import (QWidget, QVBoxLayout, QHBoxLayout, QGroupBox,
-                              QLabel, QPushButton, QLineEdit,
+                              QPushButton, QLineEdit,
                               QSpinBox, QFormLayout, QComboBox)
 from PyQt6.QtCore import pyqtSignal
 

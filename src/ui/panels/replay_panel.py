@@ -1,7 +1,9 @@
 """报文重放面板（V2.2 Phase 13 重放项）
 
-从导出的CAN Trace CSV（时间,方向,CAN ID,数据,描述）或纯HEX行文件加载帧序列，
+从CAN Trace导出文件（CSV / Vector ASC / Vector BLF）或纯HEX行文件加载帧序列，
 经当前CAN接口按固定间隔/原始时序重放。后台线程执行，不阻塞UI。
+ASC/BLF复用python-can读写器——与Trace导出同源，导出的文件可直接回放，
+CANoe/CANalyzer录制的ASC也可导入。
 """
 
 import csv
@@ -47,7 +49,8 @@ class ReplayPanel(QWidget):
         file_row = QHBoxLayout()
         self._file_edit = QLineEdit()
         self._file_edit.setReadOnly(True)
-        self._file_edit.setPlaceholderText("选择CAN Trace导出的CSV或HEX文本...")
+        self._file_edit.setPlaceholderText(
+            "选择CAN Trace导出的CSV/ASC/BLF或HEX文本...")
         file_row.addWidget(self._file_edit, 1)
         btn_load = QPushButton("加载文件")
         btn_load.clicked.connect(self._load_file)
@@ -106,13 +109,18 @@ class ReplayPanel(QWidget):
     def _load_file(self):
         filepath, _ = QFileDialog.getOpenFileName(
             self, "选择重放文件", "",
-            "CAN Trace (*.csv);;文本文件 (*.txt *.log);;所有文件 (*)")
+            "CAN Trace (*.csv *.asc *.blf);;文本文件 (*.txt *.log);;所有文件 (*)")
         if not filepath:
             return
         frames = []
         try:
-            if filepath.lower().endswith(".csv"):
+            ext = filepath.lower().rsplit(".", 1)[-1] if "." in filepath else ""
+            if ext == "csv":
                 frames = self._parse_csv(filepath)
+            elif ext == "asc":
+                frames = self._parse_asc(filepath)
+            elif ext == "blf":
+                frames = self._parse_blf(filepath)
             else:
                 frames = self._parse_hex_lines(filepath)
         except Exception as e:
@@ -153,6 +161,34 @@ class ReplayPanel(QWidget):
                     t0 = ts
                 offset = (ts - t0).total_seconds() if (ts is not None and t0 is not None) else 0.0
                 frames.append((can_id, data, offset))
+        return frames
+
+    @staticmethod
+    def _parse_asc(filepath: str) -> list:
+        """解析Vector ASC日志（本工具导出/CANoe录制），时序按首帧归零"""
+        import can
+        frames = []
+        t0 = None
+        reader = can.ASCReader(filepath)
+        for msg in reader:
+            ts = float(msg.timestamp)
+            if t0 is None:
+                t0 = ts
+            frames.append((msg.arbitration_id, bytes(msg.data), ts - t0))
+        return frames
+
+    @staticmethod
+    def _parse_blf(filepath: str) -> list:
+        """解析Vector BLF二进制日志，时序按首帧归零"""
+        import can
+        frames = []
+        t0 = None
+        reader = can.BLFReader(filepath)
+        for msg in reader:
+            ts = float(msg.timestamp)
+            if t0 is None:
+                t0 = ts
+            frames.append((msg.arbitration_id, bytes(msg.data), ts - t0))
         return frames
 
     @staticmethod

@@ -5,15 +5,19 @@ from PyQt6.QtWidgets import (
     QHeaderView, QPushButton, QLineEdit, QComboBox, QLabel, QCheckBox,
     QFileDialog, QMenu, QApplication, QMessageBox
 )
-from PyQt6.QtCore import Qt, pyqtSignal, QThread, QMutex
-from PyQt6.QtGui import QColor, QFont, QAction
+from PyQt6.QtCore import Qt, pyqtSignal, QMutex, QTimer
+from PyQt6.QtGui import QColor, QFont
 from datetime import datetime
-from typing import Optional
 import time
 
 
 class LogEntry:
     """日志条目"""
+
+    # 数据列显示截断阈值: 超长报文（如36 TransferData整块1026字节）
+    # 只显示前若干字节，全量数据保留在data（复制/导出仍为完整内容）
+    DISPLAY_MAX_BYTES = 16
+
     def __init__(self, timestamp: float, direction: str, can_id: int,
                  data: bytes, description: str = "", is_error: bool = False):
         self.timestamp = timestamp
@@ -28,6 +32,15 @@ class LogEntry:
         return " ".join(f"{b:02X}" for b in self.data)
 
     @property
+    def display_hex(self) -> str:
+        """数据列显示文本: 超长报文截断（前N字节 + 总长提示）"""
+        if len(self.data) > self.DISPLAY_MAX_BYTES:
+            shown = " ".join(f"{b:02X}" for b in
+                             self.data[:self.DISPLAY_MAX_BYTES])
+            return f"{shown} ... ({len(self.data)}B)"
+        return self.data_hex
+
+    @property
     def time_str(self) -> str:
         dt = datetime.fromtimestamp(self.timestamp)
         return dt.strftime("%H:%M:%S.%f")[:-4]
@@ -40,6 +53,18 @@ class LogWidget(QWidget):
     """
 
     message_received = pyqtSignal(LogEntry)
+    flushed = pyqtSignal()  # 批量渲染完成后发射（供外部刷新计数等）
+
+    # 行渲染资源缓存（每帧×5列创建QFont/QColor在总线洪泛时开销显著）
+    _MONO_FONT = QFont("Consolas", 10)
+    _COLOR_ERROR = QColor("#F44336")
+    _COLOR_TX = QColor("#64B5F6")
+    _COLOR_RX = QColor("#4CAF50")
+
+    # 批量渲染: 高频总线报文（洪泛时数千帧/秒）逐条insertRow+scrollToBottom
+    # 会占满GUI事件队列导致按钮点击明显滞后，改为定时批量插入
+    _FLUSH_INTERVAL_MS = 100   # 渲染批次周期
+    _MAX_PENDING = 500         # 待渲染积压上限，超过丢弃最旧（保最新）
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -54,6 +79,11 @@ class LogWidget(QWidget):
         self._rx_count = 0
         self._error_count = 0
         self._mutex = QMutex()
+        self._pending: list[LogEntry] = []  # 待批量渲染条目（GUI线程）
+        self._flush_timer = QTimer(self)
+        self._flush_timer.setSingleShot(True)
+        self._flush_timer.setInterval(self._FLUSH_INTERVAL_MS)
+        self._flush_timer.timeout.connect(self._flush_pending)
         # DoIP会话逻辑地址上下文: (tester_addr, ecu_addr)，
         # 供pcap导出重建以太网帧；CAN会话为None
         self._doip_context = None
@@ -203,16 +233,41 @@ class LogWidget(QWidget):
         self._filter_id.setToolTip("CAN ID过滤: 单个(714/0x714)或范围(714-794)")
 
     def _on_entry_received(self, entry: LogEntry):
-        """GUI线程中处理新条目"""
+        """GUI线程中接收新条目: 仅入队，等待批量渲染"""
         if self._first_timestamp == 0.0:
             self._first_timestamp = entry.timestamp
         self._last_timestamp = entry.timestamp
 
-        if self._paused:
-            self._paused_entries.append(entry)
-            return
+        # 背压保护: 待渲染积压超限时丢弃最旧条目（显示层保最新）。
+        # 洪泛的周期应用报文丢失显示不影响诊断，GUI流畅性优先
+        if len(self._pending) >= self._MAX_PENDING:
+            del self._pending[:len(self._pending) - self._MAX_PENDING + 1]
 
-        self._add_entry(entry)
+        self._pending.append(entry)
+        if not self._flush_timer.isActive():
+            self._flush_timer.start()
+
+    def _flush_pending(self):
+        """定时批量渲染待处理条目（GUI线程）"""
+        if not self._pending:
+            return
+        batch, self._pending = self._pending, []
+        if self._paused:
+            self._paused_entries.extend(batch)
+            return
+        self._insert_batch(batch)
+
+    def _insert_batch(self, batch: list):
+        """批量插入条目: 关闭重绘→逐行填充→一次滚动/计数→恢复重绘"""
+        self._table.setUpdatesEnabled(False)
+        for entry in batch:
+            self._add_entry(entry)
+        # 批量滚动一次（逐条scrollToBottom会触发整表重布局）
+        if self._auto_scroll and self._table.rowCount() > 0:
+            self._table.scrollToBottom()
+        self._table.setUpdatesEnabled(True)
+        self._update_status()
+        self.flushed.emit()
 
     @property
     def tx_count(self) -> int:
@@ -241,23 +296,17 @@ class LogWidget(QWidget):
             self._update_status()
             return
 
-        # 添加到表格
+        # 添加到表格（批量插入时由外层统一滚动/计数）
         row = self._table.rowCount()
         self._table.insertRow(row)
         self._fill_row(row, entry)
-
-        # 自动滚动
-        if self._auto_scroll:
-            self._table.scrollToBottom()
-
-        self._update_status()
 
     def _fill_row(self, row: int, entry: LogEntry):
         """填充一行数据"""
         # 时间
         time_str = self._format_time(entry)
         time_item = QTableWidgetItem(time_str)
-        time_item.setFont(QFont("Consolas", 10))
+        time_item.setFont(self._MONO_FONT)
 
         # 方向
         dir_item = QTableWidgetItem(entry.direction)
@@ -265,27 +314,27 @@ class LogWidget(QWidget):
 
         # CAN ID
         id_item = QTableWidgetItem(f"0x{entry.can_id:03X}")
-        id_item.setFont(QFont("Consolas", 10))
+        id_item.setFont(self._MONO_FONT)
         id_item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
 
-        # 数据
-        data_item = QTableWidgetItem(entry.data_hex)
-        data_item.setFont(QFont("Consolas", 10))
+        # 数据（超长报文截断显示，全量保留在entry.data供导出/复制）
+        data_item = QTableWidgetItem(entry.display_hex)
+        data_item.setFont(self._MONO_FONT)
+        if len(entry.data) > LogEntry.DISPLAY_MAX_BYTES:
+            data_item.setToolTip(entry.data_hex[:512])
 
         # 描述
         desc_item = QTableWidgetItem(entry.description)
 
         # 颜色编码
         if entry.is_error or (entry.direction == "RX" and entry.data and entry.data[0] == 0x7F):
-            color = QColor("#F44336")  # 红色 - 错误/负响应
+            color = self._COLOR_ERROR  # 红色 - 错误/负响应
             desc_item.setForeground(color)
             data_item.setForeground(color)
         elif entry.direction == "TX":
-            color = QColor("#64B5F6")  # 蓝色 - TX
-            dir_item.setForeground(color)
+            dir_item.setForeground(self._COLOR_TX)  # 蓝色 - TX
         elif entry.direction == "RX":
-            color = QColor("#4CAF50")  # 绿色 - RX正响应
-            dir_item.setForeground(color)
+            dir_item.setForeground(self._COLOR_RX)  # 绿色 - RX正响应
 
         self._table.setItem(row, 0, time_item)
         self._table.setItem(row, 1, dir_item)
@@ -358,9 +407,8 @@ class LogWidget(QWidget):
         self._paused = paused
         self._btn_pause.setText("继续" if paused else "暂停")
         if not paused and self._paused_entries:
-            for entry in self._paused_entries:
-                self._add_entry(entry)
-            self._paused_entries.clear()
+            batch, self._paused_entries = self._paused_entries, []
+            self._insert_batch(batch)
 
     def _toggle_autoscroll(self, enabled: bool):
         self._auto_scroll = enabled
@@ -376,6 +424,8 @@ class LogWidget(QWidget):
         """清除日志"""
         self._entries.clear()
         self._paused_entries.clear()
+        self._pending.clear()
+        self._flush_timer.stop()
         self._table.setRowCount(0)
         self._tx_count = 0
         self._rx_count = 0

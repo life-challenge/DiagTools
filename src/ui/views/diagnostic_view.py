@@ -35,10 +35,12 @@ class DiagnosticView(QWidget):
     business_log = pyqtSignal(str, str)
 
     # 快捷入口条定义: 图标 + 名称（§6 功能页签的快捷入口形式）
+    # 安全算法为高级诊断子Tab的直达入口: 诊断/序列/刷写均依赖算法加载，
+    # 从三级路径（高级诊断→Security Access）提升为一级快捷入口
     _QUICK_ENTRIES = [
         ("📋", "ECU信息"), ("⚠", "故障码 DTC"), ("📈", "数据流"),
         ("🔍", "DID"), ("🎛", "IO控制"), ("⚙", "例程 Routine"),
-        ("⭐", "特殊功能"), ("🧰", "高级诊断"),
+        ("⭐", "特殊功能"), ("🧰", "高级诊断"), ("🔐", "安全算法"),
     ]
 
     def __init__(self, parent=None):
@@ -132,6 +134,13 @@ class DiagnosticView(QWidget):
                            (self._sequence_panel, "序列")):
             panel.business_log.connect(
                 lambda msg, lv, t=tag: self.business_log.emit(f"[{t}] {msg}", lv))
+
+        # 序列安全访问步骤复用安全面板的算法管理器（DLL/Python插件统一
+        # 加载、等级透传），并提供直达安全算法页的跳转入口
+        self._sequence_panel.set_key_generator(
+            self._security_panel.security_manager.generate_key)
+        self._sequence_panel.open_security_requested.connect(
+            lambda: self._select_quick("安全算法"))
 
         self._select_quick("ECU信息")
 
@@ -279,9 +288,8 @@ class DiagnosticView(QWidget):
         self._read_info()
 
     def open_security(self):
-        """外部入口: 打开高级诊断-Security Access（工具-配置工具）"""
-        self._select_quick("高级诊断")
-        self._adv_tabs.setCurrentIndex(2)
+        """外部入口: 直达安全算法页（工具-Security配置/序列/刷写跳转）"""
+        self._select_quick("安全算法")
 
     @property
     def panels(self) -> list:
@@ -406,10 +414,18 @@ class DiagnosticView(QWidget):
                     "color: #4CAF50; font-weight: bold; font-size: 15px;")
 
     def _select_quick(self, name: str):
-        """快捷入口切换: 高亮当前入口按钮，切换面板堆栈"""
-        for i, (_icon, n) in enumerate(self._QUICK_ENTRIES):
-            if n == name:
-                self._stack.setCurrentIndex(i)
+        """快捷入口切换: 高亮当前入口按钮，切换面板堆栈
+
+        安全算法为高级诊断子Tab的直达入口: 堆栈切到高级诊断页并选中
+        Security Access子Tab（复用同一面板实例，不重复创建）。
+        """
+        if name == "安全算法":
+            self._stack.setCurrentWidget(self._adv_tabs)
+            self._adv_tabs.setCurrentIndex(2)
+        else:
+            for i, (_icon, n) in enumerate(self._QUICK_ENTRIES):
+                if n == name:
+                    self._stack.setCurrentIndex(i)
         for (_icon, n), btn in zip(self._QUICK_ENTRIES, self._quick_btns):
             selected = (n == name)
             btn.setObjectName("quick_btn_sel" if selected else "quick_btn")
@@ -442,8 +458,12 @@ class DiagnosticView(QWidget):
         def _read_all():
             results = {}
             for name, did in dids.items():
-                resp = client.read_data_by_identifier(did)
-                if resp and len(resp) >= 3 and resp[0] == 0x62:
+                # 真实ECU多帧DID响应可能超过P2(0.5s)，批量读取用2s超时
+                resp = client.read_data_by_identifier(did, timeout=2.0)
+                # 响应DID校验: 防止迟到/残留响应串号（62 + DID回显）
+                did_ok = (resp is not None and len(resp) >= 3
+                          and resp[1:3] == did.to_bytes(2, "big"))
+                if resp and len(resp) >= 3 and resp[0] == 0x62 and did_ok:
                     payload = resp[3:]
                     try:
                         text = payload.decode("ascii").strip("\x00 ")

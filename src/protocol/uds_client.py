@@ -2,11 +2,10 @@
 
 import time
 import threading
-from typing import Optional, Callable
+from typing import Optional
 from src.can_layer.can_interface import CanInterfaceBase
 from src.protocol.transport_layer import TransportLayer
-from src.protocol.uds_services import UdsService, ServiceID
-from src.models.uds_message import UdsMessage, UdsMessageType
+from src.protocol.uds_services import UdsService
 from src.log.log_manager import get_log_manager
 
 
@@ -79,22 +78,31 @@ class UdsClient:
         if timeout is None:
             timeout = self._p2_timeout
 
-        self._log_request(data)
+        # 事务级互斥：发送+等待响应必须原子执行。
+        # 多个后台线程（VIN回填/信息卡DID读取/DID面板等）共用同一
+        # UdsClient，无锁并发会导致请求/响应交错——A线程的响应被
+        # B线程收走，日志上表现为"上一请求未等到响应就发了下一请求"。
+        with self._lock:
+            # 新事务发送前排空陈旧帧: 上一请求超时后ECU的迟到响应
+            # 若残留在队列会污染本事务（TP层会对其回流控并错误重组）
+            self._tp.flush_rx()
 
-        if not self._tp.send_tp(data):
-            self._logger.error(f"发送失败: {self._bytes_to_hex(data)}")
-            return None
+            self._log_request(data)
 
-        if not wait_response:
-            return None
+            if not self._tp.send_tp(data):
+                self._logger.error(f"发送失败: {self._bytes_to_hex(data)}")
+                return None
 
-        response = self._receive_with_pending(timeout, data[0])
-        if response:
-            self._log_response(response)
-        else:
-            self._logger.warning("响应超时")
+            if not wait_response:
+                return None
 
-        return response
+            response = self._receive_with_pending(timeout, data[0])
+            if response:
+                self._log_response(response)
+            else:
+                self._logger.warning("响应超时")
+
+            return response
 
     def _receive_with_pending(self, timeout: float,
                              req_sid: int = None) -> Optional[bytes]:
@@ -113,7 +121,7 @@ class UdsClient:
 
             # 检查是否为pending响应
             if len(response) >= 3 and response[0] == 0x7F and response[2] == 0x78:
-                self._logger.info(f"收到pending响应 (NRC=0x78), 继续等待...")
+                self._logger.info("收到pending响应 (NRC=0x78), 继续等待...")
                 continue
 
             # SID关联校验: 丢弃与当前请求无关的陈旧响应
@@ -153,10 +161,15 @@ class UdsClient:
         data = UdsService.encode_security_access_send_key(level, key)
         return self.send_raw(data)
 
-    def read_data_by_identifier(self, did_id: int) -> Optional[bytes]:
-        """读取DID"""
+    def read_data_by_identifier(self, did_id: int,
+                                timeout: float = None) -> Optional[bytes]:
+        """读取DID
+
+        timeout: 响应等待超时（秒）。多帧DID（如VIN 20字节）真实ECU
+        响应可能超过P2(0.5s)，批量读取场景建议传 2.0。
+        """
         data = UdsService.encode_read_did(did_id)
-        return self.send_raw(data)
+        return self.send_raw(data, timeout=timeout)
 
     def write_data_by_identifier(self, did_id: int, value: bytes) -> Optional[bytes]:
         """写入DID"""

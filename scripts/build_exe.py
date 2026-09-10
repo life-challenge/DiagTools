@@ -91,7 +91,7 @@ def main():
         sys.exit(ret.returncode)
 
     print("[2/3] 复制运行时数据...")
-    n = _copy_runtime_data()
+    _copy_runtime_data()
 
     exe = os.path.join(DIST_APP_DIR, "DiagTools.exe")
     if not os.path.exists(exe):

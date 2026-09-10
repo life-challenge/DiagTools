@@ -22,8 +22,9 @@ from PyQt6.QtWidgets import (QWidget, QVBoxLayout, QHBoxLayout, QGroupBox,
                               QLabel, QPushButton, QLineEdit, QSpinBox,
                               QProgressBar, QTextEdit, QFileDialog, QCheckBox,
                               QFormLayout, QSplitter, QTreeWidget, QTreeWidgetItem,
-                              QHeaderView, QAbstractItemView, QScrollArea)
-from PyQt6.QtCore import Qt
+                              QHeaderView, QAbstractItemView, QScrollArea,
+                              QGridLayout, QDoubleSpinBox)
+from PyQt6.QtCore import Qt, pyqtSignal
 from PyQt6.QtGui import QColor
 from src.business.flash_manager import (FlashManager, FlashConfig, FlashState,
                                         FlashFileInfo, STEP_REGISTRY)
@@ -47,6 +48,15 @@ def _parse_hex_addr(text: str, default: int = 0) -> int:
 class FlashPanel(QWidget):
     """ECU刷写面板（流程可视化）"""
 
+    # FlashManager回调运行在刷写后台线程，控件更新必须经信号
+    # 切换到GUI线程——直接跨线程操作QTreeWidget/QLabel会触发
+    # Qt C++层崩溃（无Python traceback的闪退）
+    _progress_sig = pyqtSignal(object)
+    _state_sig = pyqtSignal(object, str, str)
+
+    # 请求直达ECU诊断-安全算法页（加载/管理DLL算法，供刷写安全访问算钥）
+    open_security_requested = pyqtSignal()
+
     def __init__(self, uds_client=None, parent=None):
         super().__init__(parent)
         self._uds_client = uds_client
@@ -60,6 +70,9 @@ class FlashPanel(QWidget):
         self._parsed_span = 0          # 该文件的地址跨度（擦除大小候选）
         self._flash_start_ts = 0.0     # 本次刷写开始时间（报告用）
         self._flash_file_path = ""     # 本次刷写文件（报告用）
+        # FlashManager回调经信号转发到GUI线程（刷写线程直接操作控件会崩溃）
+        self._progress_sig.connect(self._on_progress)
+        self._state_sig.connect(self._on_state_changed)
         self._init_ui()
         self._rebuild_steps()
 
@@ -86,6 +99,8 @@ class FlashPanel(QWidget):
             "driver_address": self._drv_addr_edit,
             "functional_tx_id": self._func_addr_edit,
             "erase_block_size": self._erase_bs_edit,
+            "erase_format_byte": self._erase_fmt_edit,
+            "wake_can_id": self._wake_can_id_edit,
         }
         for key, edit in hex_keys.items():
             if key in cfg:
@@ -93,6 +108,12 @@ class FlashPanel(QWidget):
                 applied += 1
         if "block_size" in cfg:
             self._block_spin.setValue(int(cfg["block_size"]))
+            applied += 1
+        if "prog_session_delay" in cfg:
+            self._prog_delay_spin.setValue(float(cfg["prog_session_delay"]))
+            applied += 1
+        if "reset_delay" in cfg:
+            self._reset_delay_spin.setValue(float(cfg["reset_delay"]))
             applied += 1
         if "security_level" in cfg:
             self._sec_spin.setValue(int(cfg["security_level"]))
@@ -108,6 +129,20 @@ class FlashPanel(QWidget):
         if "driver_path" in cfg:
             self._drv_edit.setText(str(cfg["driver_path"]))
             applied += 1
+        # 唤醒配置
+        if "wake_data" in cfg:
+            wake_data = cfg["wake_data"]
+            if isinstance(wake_data, bytes):
+                self._wake_data_edit.setText(wake_data.hex(" ").upper())
+            else:
+                self._wake_data_edit.setText(str(wake_data))
+            applied += 1
+        if "wake_period" in cfg:
+            self._wake_period_spin.setValue(int(float(cfg["wake_period"]) * 1000))
+            applied += 1
+        if "wake_duration" in cfg:
+            self._wake_duration_spin.setValue(int(cfg["wake_duration"]))
+            applied += 1
         bool_keys = {
             "enter_programming": "_session_check",
             "write_fingerprint": "_fp_check",
@@ -122,6 +157,7 @@ class FlashPanel(QWidget):
             "post_default_session": "_post_default_check",
             "post_clear_dtc": "_post_clear_check",
             "reset_after_flash": "_reset_check",
+            "wake_enabled": "_wake_check",
         }
         for key, attr in bool_keys.items():
             if key in cfg and hasattr(self, attr):
@@ -205,9 +241,30 @@ class FlashPanel(QWidget):
             "擦除按整块进行: 擦除大小向上取整到该值的整数倍（设为0则按实际大小擦除）")
         param_form.addRow("擦除块大小:", self._erase_bs_edit)
 
+        self._erase_fmt_edit = QLineEdit("0x44")
+        self._erase_fmt_edit.setToolTip(
+            "擦除例程(31 01 FF00)参数格式字节: 高半字节=地址长度，低半字节=大小长度，\n"
+            "0x44即 地址(4字节)+大小(4字节)，请求为 31 01 FF00 44+地址+大小；\n"
+            "设为0则不带格式字节（请求为 31 01 FF00+地址+大小）")
+        param_form.addRow("擦除格式字节:", self._erase_fmt_edit)
+
         self._session_check = QCheckBox("进入编程会话 (0x10 02)")
         self._session_check.setChecked(True)
         param_form.addRow(self._session_check)
+
+        # 10 02切换后的跳转稳定等待（ECU Bootloader跳转/初始化）
+        delay_row = QHBoxLayout()
+        self._prog_delay_spin = QDoubleSpinBox()
+        self._prog_delay_spin.setRange(0.0, 30.0)
+        self._prog_delay_spin.setValue(2.0)
+        self._prog_delay_spin.setSuffix(" s")
+        self._prog_delay_spin.setSingleStep(0.5)
+        self._prog_delay_spin.setToolTip(
+            "编程会话(10 02)切换后等待ECU跳转初始化的时间；\n"
+            "立即发后续请求可能被拒（7F 7F），实测DEM需2s；设为0不等待")
+        delay_row.addWidget(self._prog_delay_spin)
+        delay_row.addStretch()
+        param_form.addRow("10 02 跳转等待:", delay_row)
 
         sec_row = QHBoxLayout()
         self._sec_spin = QSpinBox()
@@ -217,6 +274,13 @@ class FlashPanel(QWidget):
             "0 = 跳过安全访问；9 = 27 09/0A；>0 时需已加载对应等级的安全算法")
         sec_row.addWidget(self._sec_spin)
         sec_row.addWidget(QLabel("(0=跳过)"))
+        # 直达安全算法页（刷写安全访问步骤依赖已加载的DLL算法）
+        sec_algo_btn = QPushButton("🔐 安全算法...")
+        sec_algo_btn.setToolTip(
+            "打开ECU诊断-安全算法页加载/管理DLL算法\n"
+            "刷写安全访问步骤将使用该算法计算密钥")
+        sec_algo_btn.clicked.connect(self.open_security_requested.emit)
+        sec_row.addWidget(sec_algo_btn)
         sec_row.addStretch()
         param_form.addRow("安全等级:", sec_row)
 
@@ -258,22 +322,59 @@ class FlashPanel(QWidget):
         param_group.setLayout(param_form)
         rlayout.addWidget(param_group)
 
-        # 刷前准备（功能寻址）
+        # ECU 唤醒配置（部分控制器需要先发送唤醒报文才能进行诊断）——两列网格压缩高度
+        wake_group = QGroupBox("ECU 唤醒（可选）")
+        wake_group.setToolTip("部分控制器（如 DEM）在休眠状态下需要先发送唤醒报文才能进行诊断")
+        wake_grid = QGridLayout()
+        wake_grid.setHorizontalSpacing(12)
+        wake_grid.setVerticalSpacing(2)
+        self._wake_check = QCheckBox("启用 ECU 唤醒")
+        self._wake_check.setChecked(False)
+        self._wake_check.setToolTip("勾选后在刷写前周期发送唤醒报文")
+        self._wake_can_id_edit = QLineEdit("0x160")
+        self._wake_can_id_edit.setToolTip("唤醒报文 CAN ID（16 进制）")
+        self._wake_data_edit = QLineEdit("FF FF FF FF FF FF FF FF")
+        self._wake_data_edit.setToolTip("唤醒报文数据（HEX 格式，最多 8 字节）")
+        self._wake_period_spin = QSpinBox()
+        self._wake_period_spin.setRange(10, 1000)
+        self._wake_period_spin.setValue(50)
+        self._wake_period_spin.setSuffix(" ms")
+        self._wake_period_spin.setToolTip("唤醒报文发送周期")
+        self._wake_duration_spin = QSpinBox()
+        self._wake_duration_spin.setRange(1, 30)
+        self._wake_duration_spin.setValue(3)
+        self._wake_duration_spin.setSuffix(" s")
+        self._wake_duration_spin.setToolTip("唤醒持续时间")
+        wake_grid.addWidget(self._wake_check, 0, 0)
+        wake_grid.addWidget(QLabel("周期:"), 0, 1)
+        wake_grid.addWidget(self._wake_period_spin, 0, 2)
+        wake_grid.addWidget(QLabel("持续:"), 0, 3)
+        wake_grid.addWidget(self._wake_duration_spin, 0, 4)
+        wake_grid.addWidget(QLabel("CAN ID:"), 1, 0)
+        wake_grid.addWidget(self._wake_can_id_edit, 1, 1)
+        wake_grid.addWidget(QLabel("数据(HEX):"), 1, 2)
+        wake_grid.addWidget(self._wake_data_edit, 1, 3, 1, 2)
+        wake_group.setLayout(wake_grid)
+        rlayout.addWidget(wake_group)
+
+        # 刷前准备（功能寻址）——复选框两列网格压缩高度
         prep_group = QGroupBox("刷前准备（功能寻址）")
-        prep_form = QFormLayout()
+        prep_grid = QGridLayout()
+        prep_grid.setHorizontalSpacing(24)
+        prep_grid.setVerticalSpacing(2)
         self._prep_ext_check = QCheckBox("扩展会话 (10 03)")
         self._prep_ext_check.setChecked(True)
-        prep_form.addRow(self._prep_ext_check)
         self._preprog_check = QCheckBox("预编程条件检查 (31 01 0203)")
         self._preprog_check.setChecked(True)
         self._preprog_check.setToolTip("物理寻址执行，等待检查结果")
-        prep_form.addRow(self._preprog_check)
         self._dtc_off_check = QCheckBox("DTC设置OFF (85 02)")
         self._dtc_off_check.setChecked(True)
-        prep_form.addRow(self._dtc_off_check)
         self._comm_disable_check = QCheckBox("禁止非诊断报文收发 (28 03 03)")
         self._comm_disable_check.setChecked(True)
-        prep_form.addRow(self._comm_disable_check)
+        prep_grid.addWidget(self._prep_ext_check, 0, 0)
+        prep_grid.addWidget(self._preprog_check, 0, 1)
+        prep_grid.addWidget(self._dtc_off_check, 1, 0)
+        prep_grid.addWidget(self._comm_disable_check, 1, 1)
 
         func_row = QHBoxLayout()
         self._func_addr_edit = QLineEdit("0x7DF")
@@ -282,40 +383,57 @@ class FlashPanel(QWidget):
         func_row.addWidget(QLabel("功能地址:"))
         func_row.addWidget(self._func_addr_edit)
         func_row.addStretch()
-        prep_form.addRow(func_row)
-        prep_group.setLayout(prep_form)
+        prep_grid.addLayout(func_row, 2, 0, 1, 2)
+        prep_group.setLayout(prep_grid)
         rlayout.addWidget(prep_group)
 
-        # 刷后检查与恢复
+        # 刷后检查与恢复——复选框两列网格压缩高度
         post_group = QGroupBox("刷后检查与恢复")
-        post_form = QFormLayout()
+        post_grid = QGridLayout()
+        post_grid.setHorizontalSpacing(24)
+        post_grid.setVerticalSpacing(2)
         self._integrity_check = QCheckBox("完整性校验 (31 01 0202)")
         self._integrity_check.setChecked(True)
-        post_form.addRow(self._integrity_check)
         self._depend_check = QCheckBox("依赖性校验 (31 01 FF01)")
         self._depend_check.setChecked(True)
-        post_form.addRow(self._depend_check)
+        post_grid.addWidget(self._integrity_check, 0, 0)
+        post_grid.addWidget(self._depend_check, 0, 1)
+
+        reset_row = QHBoxLayout()
         self._reset_check = QCheckBox("ECU复位 (11 01)")
         self._reset_check.setChecked(True)
-        post_form.addRow(self._reset_check)
+        self._reset_delay_spin = QDoubleSpinBox()
+        self._reset_delay_spin.setRange(0.0, 30.0)
+        self._reset_delay_spin.setValue(2.0)
+        self._reset_delay_spin.setSuffix(" s")
+        self._reset_delay_spin.setSingleStep(0.5)
+        self._reset_delay_spin.setToolTip(
+            "ECU复位(11 01)后等待重启稳定的时间；设为0不等待")
+        reset_row.addWidget(self._reset_check)
+        reset_row.addWidget(QLabel("重启等待:"))
+        reset_row.addWidget(self._reset_delay_spin)
+        reset_row.addStretch()
+        post_grid.addLayout(reset_row, 1, 0, 1, 2)
 
-        post_form.addRow(QLabel("刷后恢复（功能寻址）:"))
+        recover_label = QLabel("刷后恢复（功能寻址）:")
+        recover_label.setStyleSheet("color: #888;")
+        post_grid.addWidget(recover_label, 2, 0, 1, 2)
         self._post_ext_check = QCheckBox("扩展会话 (10 03)")
         self._post_ext_check.setChecked(True)
-        post_form.addRow(self._post_ext_check)
         self._post_comm_check = QCheckBox("打开通信 (28 00 03)")
         self._post_comm_check.setChecked(True)
-        post_form.addRow(self._post_comm_check)
         self._post_dtc_check = QCheckBox("DTC设置ON (85 01)")
         self._post_dtc_check.setChecked(True)
-        post_form.addRow(self._post_dtc_check)
         self._post_default_check = QCheckBox("默认会话 (10 01)")
         self._post_default_check.setChecked(True)
-        post_form.addRow(self._post_default_check)
         self._post_clear_check = QCheckBox("清除DTC (14 FF FF FF)")
         self._post_clear_check.setChecked(True)
-        post_form.addRow(self._post_clear_check)
-        post_group.setLayout(post_form)
+        post_grid.addWidget(self._post_ext_check, 3, 0)
+        post_grid.addWidget(self._post_comm_check, 3, 1)
+        post_grid.addWidget(self._post_dtc_check, 4, 0)
+        post_grid.addWidget(self._post_default_check, 4, 1)
+        post_grid.addWidget(self._post_clear_check, 5, 0)
+        post_group.setLayout(post_grid)
         rlayout.addWidget(post_group)
 
         # 参数变化时刷新步骤列表预览
@@ -350,18 +468,22 @@ class FlashPanel(QWidget):
         progress_group.setLayout(progress_layout)
         rlayout.addWidget(progress_group)
 
-        # 控制按钮
+        # 控制按钮——互斥状态: 与工具栏连接/断开一致，任何时刻只有一个可操作；
+        # 控件级QSS必须显式声明:disabled样式，否则禁用后仍显示原色、
+        # 看起来可点实际点击无反应（覆盖全局QSS的禁用外观）
         btn_layout = QHBoxLayout()
         self._start_btn = QPushButton("开始刷写")
         self._start_btn.setStyleSheet(
-            "QPushButton { padding: 10px; font-weight: bold; background: #4CAF50; color: white; }")
+            "QPushButton { padding: 10px; font-weight: bold; background: #4CAF50; color: white; }"
+            "QPushButton:disabled { background: #4E5B4E; color: #7A857A; }")
         self._start_btn.clicked.connect(self._start_flash)
         btn_layout.addWidget(self._start_btn)
 
         self._stop_btn = QPushButton("停止")
         self._stop_btn.setEnabled(False)
         self._stop_btn.setStyleSheet(
-            "QPushButton { padding: 10px; background: #F44336; color: white; }")
+            "QPushButton { padding: 10px; background: #F44336; color: white; }"
+            "QPushButton:disabled { background: #5B4E4E; color: #857A7A; }")
         self._stop_btn.clicked.connect(self._stop_flash)
         btn_layout.addWidget(self._stop_btn)
         rlayout.addLayout(btn_layout)
@@ -428,10 +550,14 @@ class FlashPanel(QWidget):
         config.erase_address = config.target_address
         config.erase_block_size = _parse_hex_addr(
             self._erase_bs_edit.text(), 0x40000)
+        config.erase_format_byte = _parse_hex_addr(
+            self._erase_fmt_edit.text(), 0x44) & 0xFF
         # 已解析过当前文件时，擦除大小取文件地址跨度（执行时向上取整到擦除块大小）
         if self._parsed_path == config.file_path and self._parsed_span:
             config.erase_size = self._parsed_span
         config.enter_programming = self._session_check.isChecked()
+        config.prog_session_delay = self._prog_delay_spin.value()
+        config.reset_delay = self._reset_delay_spin.value()
         config.security_level = self._sec_spin.value()
         config.key_generator = self._key_generator
         config.reset_after_flash = self._reset_check.isChecked()
@@ -455,6 +581,19 @@ class FlashPanel(QWidget):
         config.preprog_check = self._preprog_check.isChecked()
         config.dtc_off = self._dtc_off_check.isChecked()
         config.comm_disable = self._comm_disable_check.isChecked()
+        # ECU 唤醒
+        config.wake_enabled = self._wake_check.isChecked()
+        config.wake_can_id = _parse_hex_addr(self._wake_can_id_edit.text(), 0x160)
+        try:
+            config.wake_data = bytes.fromhex(
+                self._wake_data_edit.text().replace(" ", "").replace("0x", ""))
+            if len(config.wake_data) > 8:
+                config.wake_data = config.wake_data[:8]
+            config.wake_data = config.wake_data + bytes(8 - len(config.wake_data))
+        except ValueError:
+            config.wake_data = bytes([0xFF] * 8)
+        config.wake_period = self._wake_period_spin.value() / 1000.0
+        config.wake_duration = float(self._wake_duration_spin.value())
         # 刷后检查
         config.check_integrity = self._integrity_check.isChecked()
         config.check_dependency = self._depend_check.isChecked()
@@ -567,9 +706,10 @@ class FlashPanel(QWidget):
                       f"安全访问步骤将失败（安全面板加载算法后重试）")
 
         self._flash_manager.config = config
+        # 回调仅做信号发射（线程安全），控件更新在GUI线程执行
         self._flash_manager.set_callbacks(
-            progress_cb=self._on_progress,
-            state_cb=self._on_state_changed)
+            progress_cb=self._progress_sig.emit,
+            state_cb=self._state_sig.emit)
 
         # 刷写报告所需的起止信息（终态时自动生成）
         self._flash_start_ts = time.time()
@@ -584,8 +724,11 @@ class FlashPanel(QWidget):
         self._flash_manager.start_flash(config)
 
     def _stop_flash(self):
+        # 互斥: 停止请求发出后立即禁用自身防重复点击，
+        # 待刷写线程到步骤边界确认取消（终态回调）后再恢复开始按钮
+        self._stop_btn.setEnabled(False)
         self._flash_manager.stop_flash()
-        self._log("正在停止刷写...")
+        self._log("正在停止刷写...（当前步骤结束后停止）")
 
     def _on_progress(self, progress):
         self._progress_bar.setValue(int(progress.percentage))

@@ -5,8 +5,8 @@
     "interface_type": "pcan",
     "channel": "PCAN_USBBUS1",
     "bitrate": 500000,
-    "req_id": 1812,
-    "resp_id": 1940
+    "req_id": 1813,
+    "resp_id": 1941
   },
   "ecus": [
     {
@@ -26,11 +26,12 @@
   },
   "ui": {
     "theme": "dark",
-    "timestamp_mode": "absolute"
+    "timestamp_mode": "absolute",
+    "log_dock_height": 321
   },
-  "modified": "2026-08-31T11:16:15.121664",
+  "modified": "2026-09-10T16:14:37.394483",
   "project": {
-    "current_ecu": "DASH",
+    "current_ecu": "DEM",
     "hidden_ecus": [],
     "recent": [
       "d:\\DiagTools\\resources\\config\\default_config.json"
@@ -39,5 +40,19 @@
   "security": {
     "python32_path": "D:/Python32/python.exe"
   },
-  "project_version": "2.2"
+  "project_version": "2.2",
+  "doip": {
+    "ip": "127.0.0.1",
+    "port": 13400,
+    "tester_addr": 3712,
+    "ecu_addr": 4096
+  },
+  "wake": {
+    "can_id": 352,
+    "data": "FFFFFFFFFFFFFFFF",
+    "repeat": 20,
+    "interval": 100,
+    "period": 100,
+    "auto": true
+  }
 }

@@ -1,7 +1,6 @@
 """DTC状态位可视化控件（符合ISO 14229状态位定义）"""
 
-from PyQt6.QtWidgets import QWidget, QHBoxLayout, QCheckBox, QVBoxLayout, QLabel, QGroupBox
-from PyQt6.QtCore import Qt
+from PyQt6.QtWidgets import QHBoxLayout, QCheckBox, QVBoxLayout, QLabel, QGroupBox
 
 
 DTC_STATUS_BITS = {

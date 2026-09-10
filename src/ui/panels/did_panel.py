@@ -3,8 +3,7 @@
 import os
 from PyQt6.QtWidgets import (QWidget, QVBoxLayout, QHBoxLayout, QGroupBox,
                               QLabel, QPushButton, QTableWidget, QTableWidgetItem,
-                              QHeaderView, QLineEdit, QComboBox,
-                              QFileDialog, QCheckBox, QSpinBox, QGridLayout)
+                              QHeaderView, QLineEdit, QFileDialog, QCheckBox, QSpinBox, QGridLayout)
 from PyQt6.QtCore import Qt, QTimer, QThread, pyqtSignal
 from PyQt6.QtGui import QColor, QFont
 from src.business.did_manager import DidManager, DidDefinition
@@ -84,7 +83,15 @@ class DidPanel(QWidget):
         self._table.setHorizontalHeaderLabels(
             ["DID", "名称", "类型", "当前值", "原始数据", "单位", "状态"])
         header = self._table.horizontalHeader()
+        # 名称列独占弹性空间；数据列随内容自适应，保证“当前值/原始数据”
+        # 不被长名称挤压显示不全
         header.setSectionResizeMode(1, QHeaderView.ResizeMode.Stretch)
+        for col in (0, 2, 3, 4, 5):
+            header.setSectionResizeMode(
+                col, QHeaderView.ResizeMode.ResizeToContents)
+        # 超长名称以省略号截断（完整内容见tooltip）
+        self._table.setTextElideMode(Qt.TextElideMode.ElideRight)
+        self._table.setWordWrap(False)
         self._table.setSelectionBehavior(
             QTableWidget.SelectionBehavior.SelectRows)
         layout.addWidget(self._table)
@@ -140,12 +147,41 @@ class DidPanel(QWidget):
     def _load_definitions(self):
         start_dir = get_resource_path("did_definitions")
         filepath, _ = QFileDialog.getOpenFileName(
-            self, "加载DID定义", start_dir, "JSON Files (*.json)")
+            self, "加载DID定义", start_dir,
+            "DID定义/调查表 (*.json *.xlsx *.xlsm);;JSON Files (*.json);;"
+            "调查表Excel (*.xlsx *.xlsm)")
         if filepath:
             self.import_definitions(filepath)
 
     def import_definitions(self, filepath: str) -> int:
-        """程序化导入DID定义（菜单/项目加载入口），返回导入数量"""
+        """程序化导入DID定义（菜单/项目加载入口），返回导入数量
+
+        支持JSON与OEM调查表xlsx（解析其中的dids sheet）
+        """
+        import os as _os
+        if _os.path.splitext(filepath)[1].lower() in (".xlsx", ".xlsm"):
+            try:
+                from src.business.survey_xlsx_parser import parse_survey_xlsx
+                dids = parse_survey_xlsx(filepath).get("dids", [])
+            except Exception as e:
+                self._log(f"调查表解析失败: {e}", "ERROR")
+                return 0
+            count = 0
+            for item in dids:
+                try:
+                    self._did_manager.add_definition(
+                        DidDefinition.from_dict(item))
+                    count += 1
+                except Exception:
+                    pass  # 无效条目跳过（from_dict已校验did_id）
+            if count > 0:
+                self._refresh_table()
+                self._log(f"从调查表加载了 {count} 个DID定义: "
+                          f"{_os.path.basename(filepath)}")
+            else:
+                self._log(f"调查表内未解析到DID定义: {filepath}")
+            return count
+
         count = self._did_manager.load_definitions_from_json(filepath)
         if count > 0:
             self._refresh_table()
@@ -160,7 +196,9 @@ class DidPanel(QWidget):
 
         for row, (did_id, defn) in enumerate(sorted(definitions.items())):
             self._table.setItem(row, 0, QTableWidgetItem(f"0x{did_id:04X}"))
-            self._table.setItem(row, 1, QTableWidgetItem(defn.name))
+            name_item = QTableWidgetItem(defn.name)
+            name_item.setToolTip(defn.description or defn.name)
+            self._table.setItem(row, 1, name_item)
             self._table.setItem(row, 2, QTableWidgetItem(defn.data_type))
 
             val = self._did_manager.get_value(did_id)

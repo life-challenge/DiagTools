@@ -9,9 +9,9 @@
 
 import time
 import threading
-from typing import Optional, Callable
+from typing import Optional
 from src.can_layer.can_interface import CanInterfaceBase
-from src.models.can_message import CanMessage, CanMessageType, CanDirection
+from src.models.can_message import CanMessage
 
 
 class FrameType:
@@ -152,7 +152,24 @@ class TransportLayer:
                 start_time = time.time()
                 continue
 
+        self._rx_receiving = False   # 超时放弃，复位重组中间态，
+        # 避免半组装状态泄漏到下一事务
         return None
+
+    def flush_rx(self):
+        """清空CAN接收队列并复位重组中间态（新事务发送前调用）
+
+        上一请求超时后ECU的迟到响应若残留在接收队列，会被误当作
+        新请求的响应消费——尤其多帧首帧会触发流控帧发送并开始重组，
+        与新事务的响应交错污染（表现为响应数据错乱/串号）。
+        发送新请求前主动排空陈旧帧。
+        """
+        while self._can.receive(timeout=0.001) is not None:
+            pass
+        self._rx_receiving = False
+        self._rx_buffer = bytearray()
+        self._rx_total_length = 0
+        self._rx_expected_seq = 0
 
     def _send_single_frame(self, data: bytes, can_id: int) -> bool:
         """发送单帧"""
@@ -163,6 +180,38 @@ class TransportLayer:
         frame_data = frame_data + bytes(8 - len(frame_data))
         msg = CanMessage(can_id=can_id, data=frame_data, dlc=8)
         return self._can.send(msg)
+
+    def _wait_flow_control(self, timeout: float) -> Optional[tuple]:
+        """等待流控帧 (FC): 循环接收，跳过总线上无关ECU的周期帧
+
+        真实总线存在大量非诊断周期报文（如0x162每毫秒一帧），发完
+        首帧后单次receive取到的帧几乎总是与诊断无关——旧逻辑
+        "取到首帧且非rx_id即判失败"导致多帧请求在繁忙总线上
+        发送失败（首帧后约1ms即报错，超时时间根本没用上）。
+
+        Returns:
+            (bs, st_min) 成功；None 超时或 OVERFLOW
+        """
+        deadline = time.time() + timeout
+        while time.time() < deadline:
+            msg = self._can.receive(timeout=0.05)
+            if msg is None:
+                continue
+            if msg.can_id != self._rx_id or not msg.data:
+                continue   # 跳过总线上其他ECU的周期帧
+            if (msg.data[0] & 0xF0) != FrameType.FLOW_CONTROL:
+                continue   # 跳过迟到响应等非FC帧
+            flow_status = msg.data[0] & 0x0F
+            if flow_status == FlowStatus.WAIT:
+                continue   # ECU要求继续等待，等下一个FC
+            if flow_status != FlowStatus.CONTINUE_TO_SEND:
+                return None   # OVERFLOW等异常状态
+            bs = msg.data[1]   # Block Size
+            st_min = msg.data[2]   # STmin (ms)
+            if bs == 0:
+                bs = 999999   # 不限制
+            return bs, st_min
+        return None
 
     def _send_multi_frame(self, data: bytes, can_id: int) -> bool:
         """发送多帧（首帧 + 连续帧）"""
@@ -179,21 +228,10 @@ class TransportLayer:
         offset = 6
 
         # 等待流控帧 (FC)
-        fc_msg = self._can.receive(timeout=self._timeout)
-        if fc_msg is None or fc_msg.can_id != self._rx_id:
+        fc = self._wait_flow_control(self._timeout)
+        if fc is None:
             return False
-
-        if (fc_msg.data[0] & 0xF0) != FrameType.FLOW_CONTROL:
-            return False
-
-        flow_status = fc_msg.data[0] & 0x0F
-        if flow_status == FlowStatus.OVERFLOW:
-            return False
-
-        bs = fc_msg.data[1]  # Block Size
-        st_min = fc_msg.data[2]  # STmin (ms)
-        if bs == 0:
-            bs = 999999  # 不限制
+        bs, st_min = fc
 
         # 发送连续帧 (CF)
         seq = 1
@@ -202,18 +240,11 @@ class TransportLayer:
         while offset < total_length:
             # 检查是否需要等待FC
             if block_count >= bs and offset < total_length:
-                fc_msg = self._can.receive(timeout=self._timeout)
-                if fc_msg is None:
+                fc = self._wait_flow_control(self._timeout)
+                if fc is None:
                     return False
-                if (fc_msg.data[0] & 0xF0) == FrameType.FLOW_CONTROL:
-                    flow_status = fc_msg.data[0] & 0x0F
-                    if flow_status != FlowStatus.CONTINUE_TO_SEND:
-                        return False
-                    bs = fc_msg.data[1]
-                    if bs == 0:
-                        bs = 999999
-                    st_min = fc_msg.data[2]
-                    block_count = 0
+                bs, st_min = fc
+                block_count = 0
 
             # 构造连续帧
             cf_pci = 0x20 | (seq & 0x0F)

@@ -2,7 +2,6 @@
 
 from PyQt6.QtWidgets import (QDialog, QVBoxLayout, QHBoxLayout, QLabel,
                               QProgressBar, QPushButton, QTextEdit)
-from PyQt6.QtCore import Qt
 
 
 class ProgressDialog(QDialog):

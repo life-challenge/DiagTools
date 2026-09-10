@@ -10,7 +10,7 @@ if project_root not in sys.path:
     sys.path.insert(0, project_root)
 
 from PyQt6.QtWidgets import QApplication, QMessageBox
-from PyQt6.QtCore import Qt, qInstallMessageHandler, QtMsgType
+from PyQt6.QtCore import qInstallMessageHandler, QtMsgType
 from PyQt6.QtGui import QIcon
 
 import src
@@ -69,6 +69,14 @@ def main():
 
     # 初始化配置管理器
     config = ConfigManager()
+
+    # 启动时自动清理过期日志（保留天数来自配置，默认30天）——
+    # 此前 cleanup_old_logs 为死代码，长期使用后 logs/ 每子目录堆积数百文件
+    retention_days = int(config.get("log.retention_days", 30))
+    deleted = log_manager.cleanup_old_logs(retention_days)
+    if deleted:
+        app_logger.info("已清理 %d 个超过 %d 天的旧日志文件",
+                        deleted, retention_days)
 
     # 高DPI支持
     os.environ.setdefault("QT_ENABLE_HIGHDPI_SCALING", "1")

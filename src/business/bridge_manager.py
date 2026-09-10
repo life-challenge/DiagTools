@@ -180,10 +180,10 @@ class BridgeManager:
         exe = self.python32
         if not exe:
             raise BridgeError(
-                f"DLL位数与当前Python不匹配，且未找到可用的32位Python，无法桥接加载。\n"
-                f"请安装32位Python（从 python.org 下载 Windows x86 安装包），\n"
-                f"然后在安全面板的\"32位Python\"栏指定其 python.exe 路径；\n"
-                f"或向算法提供方索取64位版本的DLL。")
+                "DLL位数与当前Python不匹配，且未找到可用的32位Python，无法桥接加载。\n"
+                "请安装32位Python（从 python.org 下载 Windows x86 安装包），\n"
+                "然后在安全面板的\"32位Python\"栏指定其 python.exe 路径；\n"
+                "或向算法提供方索取64位版本的DLL。")
 
         script = get_bridge_worker_path()
         flags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
@@ -283,24 +283,31 @@ class BridgeManager:
         self._loaded[handle] = (os.path.abspath(dll_path), stdcall, no_options)
         return handle, resp["fn_name"], resp["level"]
 
-    def generate_key(self, handle: int, seed: bytes) -> bytes:
+    def generate_key(self, handle: int, seed: bytes,
+                     level: int = None) -> bytes:
         """在桥接进程中计算密钥（懒重加）
 
+        level为实际请求的安全等级，透传给DLL的GenerateKeyEx入参
+        （None时用加载时探测的声明等级）。
         子进程重启（指定新32位Python路径）或进程崩溃后，旧句柄在新进程中无效，
         自动按记录的路径重新加载该DLL后重试一次。
         """
         try:
-            return self._call_generate_key(handle, seed)
+            return self._call_generate_key(handle, seed, level)
         except BridgeError as e:
             if isinstance(e, BridgeProcessDied) or "无效的DLL句柄" in str(e):
-                return self._reload_and_retry(handle, seed, str(e))
+                return self._reload_and_retry(handle, seed, level, str(e))
             raise
 
-    def _call_generate_key(self, handle: int, seed: bytes) -> bytes:
+    def _call_generate_key(self, handle: int, seed: bytes,
+                           level: int = None) -> bytes:
         # handle=调用方持有的原始句柄；记录/回退都挂在该句柄上，保证重启后不丢失
         real_handle = self._handle_remap.get(handle, handle)
-        resp = self._call({"cmd": "generate_key", "handle": real_handle,
-                           "seed_hex": seed.hex()})
+        req = {"cmd": "generate_key", "handle": real_handle,
+               "seed_hex": seed.hex()}
+        if level is not None:
+            req["level"] = level
+        resp = self._call(req)
         # 桥接进程内部签名回退成功（如DLL无options参数）: 记住，重启后直接命中7参签名
         if resp.get("fallback"):
             rec = self._loaded.get(handle)
@@ -310,7 +317,8 @@ class BridgeManager:
             self._logger.info("桥接DLL签名回退成功(无options的7参版本)，已记住该签名")
         return bytes.fromhex(resp["key_hex"])
 
-    def _reload_and_retry(self, old_handle: int, seed: bytes, reason: str) -> bytes:
+    def _reload_and_retry(self, old_handle: int, seed: bytes,
+                           level: int, reason: str) -> bytes:
         """句柄失效/进程重启后，重新加载该DLL并重试一次"""
         rec = self._loaded.get(old_handle)
         if rec is None:
@@ -321,7 +329,7 @@ class BridgeManager:
         # 新句柄同步一份记录，后续无论用哪个句柄查都能命中（包含回退更新）
         self._loaded[old_handle] = rec
         self._handle_remap[old_handle] = new_handle
-        return self._call_generate_key(old_handle, seed)
+        return self._call_generate_key(old_handle, seed, level)
 
     def shutdown(self):
         """关闭桥接子进程（程序退出/路径切换时调用）

@@ -18,18 +18,30 @@ class ToolsView(QWidget):
 
         layout = QHBoxLayout(self)
         layout.setContentsMargins(6, 6, 6, 6)
+        layout.setSpacing(12)
 
-        connection_panel.setMaximumWidth(380)
+        # 左列通信配置: 宽度上限需覆盖面板内容最小宽（~440），
+        # 过窄会导致行尾控件（扫描按钮等）被裁切
+        connection_panel.setMinimumWidth(420)
+        connection_panel.setMaximumWidth(460)
         layout.addWidget(connection_panel)
 
         hint = QLabel(
-            "VCI / 通信配置\n\n"
-            "· 选择接口类型（Virtual/PCAN/Vector/DoIP）后点击\"连接\"，或使用工具栏 连接(F5)/断开(F6)\n"
-            "· 连接参数在连接成功与退出时自动保存，下次启动自动恢复\n"
-            "· DoIP无真实ECU时可勾选\"本地虚拟ECU（回环模拟）\"在本机测试\n"
+            "<b>VCI / 通信配置</b><br>"
+            "<span style='color:#aaa;'>连接参数在此配置，工具栏 连接(F5)/断开(F6) 同步可控</span>"
+            "<hr style='border:none;border-top:1px solid #444;'>"
+            "· 选择接口类型（Virtual/PCAN/Vector/DoIP）后点击\"连接\"，"
+            "或使用工具栏 连接(F5)/断开(F6)<br>"
+            "· 连接参数在连接成功与退出时自动保存，下次启动自动恢复<br>"
+            "· PCAN/Vector 接口可用通道行右侧\"扫描\"按钮自动发现硬件<br>"
+            "· 休眠ECU（如DEM）可勾选\"连接时自动唤醒\"后再连接<br>"
+            "· DoIP无真实ECU时可勾选\"本地虚拟ECU（回环模拟）\"在本机测试<br>"
             "· 安全算法32位桥接所需的Python路径在 ECU诊断→高级诊断→安全访问 中配置")
         hint.setAlignment(Qt.AlignmentFlag.AlignTop | Qt.AlignmentFlag.AlignLeft)
-        hint.setStyleSheet("color: #888; padding: 12px;")
+        hint.setStyleSheet(
+            "color: #999; padding: 16px;"
+            "background: rgba(255,255,255,0.03);"
+            "border: 1px solid #3a3a3a; border-radius: 6px;")
         hint.setWordWrap(True)
         layout.addWidget(hint, 1)
 

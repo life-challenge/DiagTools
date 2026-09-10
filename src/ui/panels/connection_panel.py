@@ -1,10 +1,13 @@
 """通信连接配置面板（CAN / DoIP）"""
 
+import threading
 from PyQt6.QtWidgets import (QWidget, QVBoxLayout, QHBoxLayout, QGroupBox,
                               QLabel, QComboBox, QLineEdit, QPushButton,
-                              QFormLayout, QSpinBox, QMessageBox, QCheckBox)
-from PyQt6.QtCore import pyqtSignal, Qt
+                              QFormLayout, QSpinBox, QMessageBox, QCheckBox,
+                              QTextEdit, QScrollArea)
+from PyQt6.QtCore import pyqtSignal, Qt, QTimer
 from src.can_layer.can_factory import CanFactory
+from src.models.can_message import CanMessage
 from src.utils.config_manager import get_config_manager
 
 # 接口类型: 配置字符串 <-> 下拉框索引
@@ -16,6 +19,7 @@ class ConnectionPanel(QWidget):
     """通信连接配置面板（CAN/DoIP接口选择、地址配置与连接控制）"""
 
     connection_changed = pyqtSignal(bool)  # 连接状态变化信号
+    _auto_wake_done = pyqtSignal()          # 连接时自动唤醒完成（后台线程回UI线程）
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -25,7 +29,18 @@ class ConnectionPanel(QWidget):
         self._init_ui()
 
     def _init_ui(self):
-        layout = QVBoxLayout(self)
+        # 外层滚动区: 小窗口/低分辨率下配置项纵向滚动不再被截断。
+        # 工具中心左列是固定窄列（~380px），只允许纵向滚动:
+        # 横向滚动会把行尾控件（如通道行的扫描按钮）挤出初始可视区
+        outer = QVBoxLayout(self)
+        outer.setContentsMargins(0, 0, 0, 0)
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QScrollArea.Shape.NoFrame)
+        scroll.setHorizontalScrollBarPolicy(
+            Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        content = QWidget()
+        layout = QVBoxLayout(content)
 
         # 接口配置组
         config_group = QGroupBox("通信接口配置")
@@ -41,11 +56,15 @@ class ConnectionPanel(QWidget):
         channel_row = QHBoxLayout()
         self._channel_combo = QComboBox()
         self._channel_combo.setEditable(True)
+        # 窄列下与扫描按钮同排（120+64+间距<可用列宽），
+        # 过大的最小宽会把扫描按钮顶出可视区
         self._channel_combo.setMinimumWidth(120)
+        self._channel_combo.setSizeAdjustPolicy(
+            QComboBox.SizeAdjustPolicy.AdjustToContents)
         channel_row.addWidget(self._channel_combo, 1)
 
         self._scan_btn = QPushButton("扫描")
-        self._scan_btn.setFixedWidth(50)
+        self._scan_btn.setMinimumWidth(64)
         self._scan_btn.setToolTip("扫描可用通道")
         self._scan_btn.clicked.connect(self._on_scan_channels)
         self._scan_btn.setVisible(False)  # 仅PCAN/Vector时显示
@@ -71,7 +90,7 @@ class ConnectionPanel(QWidget):
 
         ip_row = QHBoxLayout()
         self._doip_ip = QLineEdit("127.0.0.1")
-        self._doip_ip.setMinimumWidth(120)
+        self._doip_ip.setMinimumWidth(100)
         ip_row.addWidget(self._doip_ip, 1)
         self._doip_scan_btn = QPushButton("发现ECU")
         self._doip_scan_btn.setToolTip("UDP广播搜索局域网内的DoIP节点")
@@ -116,23 +135,106 @@ class ConnectionPanel(QWidget):
         addr_group = QGroupBox("UDS地址配置")
         addr_form = QFormLayout()
 
+        # TX/RX 并排一行: 窄列布局减少纵向占位，前缀区分方向
+        addr_row = QHBoxLayout()
         self._tx_id = QSpinBox()
         self._tx_id.setRange(0, 0x7FF)
         self._tx_id.setDisplayIntegerBase(16)
-        self._tx_id.setPrefix("0x")
+        self._tx_id.setPrefix("请求 0x")
         self._tx_id.setValue(0x7E0)
-        addr_form.addRow("请求地址 (TX):", self._tx_id)
-
+        addr_row.addWidget(self._tx_id, 1)
         self._rx_id = QSpinBox()
         self._rx_id.setRange(0, 0x7FF)
         self._rx_id.setDisplayIntegerBase(16)
-        self._rx_id.setPrefix("0x")
+        self._rx_id.setPrefix("响应 0x")
         self._rx_id.setValue(0x7E8)
-        addr_form.addRow("响应地址 (RX):", self._rx_id)
+        addr_row.addWidget(self._rx_id, 1)
+        addr_form.addRow("诊断地址:", addr_row)
 
         addr_group.setLayout(addr_form)
         layout.addWidget(addr_group)
         self._addr_group = addr_group
+
+        # 唤醒报文配置组（仅CAN模式显示）
+        wake_group = QGroupBox("ECU唤醒报文")
+        wake_group.setToolTip("部分ECU（如DEM）在休眠状态下需要先发送唤醒报文才能进行诊断通信")
+        wake_form = QFormLayout()
+
+        # CAN ID 与周期并排一行（窄列紧凑布局）
+        id_row = QHBoxLayout()
+        self._wake_can_id = QSpinBox()
+        self._wake_can_id.setRange(0, 0x7FF)
+        self._wake_can_id.setDisplayIntegerBase(16)
+        self._wake_can_id.setPrefix("0x")
+        self._wake_can_id.setValue(0x160)
+        self._wake_can_id.setToolTip("唤醒报文的CAN ID（16进制）")
+        id_row.addWidget(self._wake_can_id, 1)
+        id_row.addWidget(QLabel("周期:"))
+        self._wake_period = QSpinBox()
+        self._wake_period.setRange(10, 10000)
+        self._wake_period.setValue(100)
+        self._wake_period.setSuffix(" ms")
+        self._wake_period.setToolTip("唤醒报文发送周期（毫秒）")
+        id_row.addWidget(self._wake_period)
+        wake_form.addRow("CAN ID:", id_row)
+
+        self._wake_data = QLineEdit("FF FF FF FF FF FF FF FF")
+        self._wake_data.setPlaceholderText("如: FF FF FF FF FF FF FF FF")
+        self._wake_data.setStyleSheet("font-family: 'Consolas', monospace;")
+        self._wake_data.setToolTip("唤醒报文数据（HEX格式，最多8字节）")
+        wake_form.addRow("数据(HEX):", self._wake_data)
+
+        # 控制行: 自动唤醒开关 + 启动/停止
+        wake_ctrl_row = QHBoxLayout()
+
+        # 连接时自动唤醒（市场通行做法: 总线连接后先周期发唤醒帧再发自检，
+        # 避免ECU休眠时自检必失败; CANoe/CANape同款"wake-up on connect"）
+        self._wake_auto_check = QCheckBox("连接时自动唤醒")
+        self._wake_auto_check.setToolTip(
+            "勾选后连接流程变为: 打开总线 → 周期发送唤醒报文约2秒 → 再发诊断自检。\n"
+            "适用于休眠ECU（如DEM）; 已醒的ECU多收几帧唤醒报文无副作用")
+        wake_ctrl_row.addWidget(self._wake_auto_check)
+
+        self._wake_start_btn = QPushButton("启动")
+        self._wake_start_btn.setObjectName("btn_wake_start")
+        self._wake_start_btn.setToolTip("开始周期发送唤醒报文")
+        self._wake_start_btn.clicked.connect(self._on_start_wake)
+        self._wake_start_btn.setFixedWidth(56)
+        wake_ctrl_row.addWidget(self._wake_start_btn)
+
+        self._wake_stop_btn = QPushButton("停止")
+        self._wake_stop_btn.setObjectName("btn_wake_stop")
+        self._wake_stop_btn.setEnabled(False)
+        self._wake_stop_btn.setToolTip("停止发送唤醒报文")
+        self._wake_stop_btn.clicked.connect(self._on_stop_wake)
+        self._wake_stop_btn.setFixedWidth(56)
+        wake_ctrl_row.addWidget(self._wake_stop_btn)
+
+        wake_ctrl_row.addStretch()
+
+        wake_ctrl_widget = QWidget()
+        wake_ctrl_widget.setLayout(wake_ctrl_row)
+        wake_form.addRow("", wake_ctrl_widget)
+
+        # 唤醒日志
+        self._wake_log = QTextEdit()
+        self._wake_log.setReadOnly(True)
+        self._wake_log.setMinimumHeight(72)
+        self._wake_log.setStyleSheet(
+            "font-family: 'Consolas', monospace; font-size: 11px;")
+        wake_form.addRow("日志:", self._wake_log)
+
+        wake_group.setLayout(wake_form)
+        layout.addWidget(wake_group)
+        self._wake_group = wake_group
+
+        # 周期发送定时器
+        self._wake_timer = QTimer()
+        self._wake_timer.timeout.connect(self._send_wake_frame)
+        self._wake_running = False
+        # 连接时自动唤醒完成 → 通知上层自检（后台线程经信号回UI线程）
+        self._auto_wake_done.connect(self._on_auto_wake_done)
+        self._auto_wake_thread = None
 
         # 连接按钮（与工具栏同一套黄/红配色与互补置灰规则，
         # objectName 挂全局QSS；不再本地setStyleSheet，否则会覆盖主题样式）
@@ -159,6 +261,10 @@ class ConnectionPanel(QWidget):
         # 初始化默认通道，然后从配置恢复上次的连接参数
         self._on_type_changed(0)
         self.load_saved_config()
+
+        # 收尾: 内容装进滚动区
+        scroll.setWidget(content)
+        outer.addWidget(scroll)
 
     @staticmethod
     def _parse_id(value, default: int) -> int:
@@ -209,6 +315,21 @@ class ConnectionPanel(QWidget):
         self._doip_ecu_addr.setValue(
             self._parse_id(cfg.get("doip.ecu_addr"), 0x1000))
 
+        # 恢复唤醒报文配置
+        self._wake_can_id.setValue(
+            self._parse_id(cfg.get("wake.can_id"), 0x160))
+        wake_data = cfg.get("wake.data", "FF FF FF FF FF FF FF FF")
+        if isinstance(wake_data, str):
+            self._wake_data.setText(wake_data)
+        else:
+            self._wake_data.setText("FF FF FF FF FF FF FF FF")
+        try:
+            self._wake_period.setValue(int(cfg.get("wake.period", 100)))
+        except (ValueError, TypeError):
+            pass
+        # 恢复“连接时自动唤醒”开关
+        self._wake_auto_check.setChecked(bool(cfg.get("wake.auto", False)))
+
     def save_to_config(self):
         """将当前连接参数写入配置并持久化到磁盘"""
         try:
@@ -229,6 +350,11 @@ class ConnectionPanel(QWidget):
             cfg.set("doip.port", self._doip_port.value())
             cfg.set("doip.tester_addr", self._doip_tester_addr.value())
             cfg.set("doip.ecu_addr", self._doip_ecu_addr.value())
+            # 保存唤醒报文配置
+            cfg.set("wake.can_id", self._wake_can_id.value())
+            cfg.set("wake.data", self._wake_data.text().strip() or "FF FF FF FF FF FF FF FF")
+            cfg.set("wake.period", self._wake_period.value())
+            cfg.set("wake.auto", self._wake_auto_check.isChecked())
             cfg.save_config()
         except Exception:
             pass
@@ -262,12 +388,13 @@ class ConnectionPanel(QWidget):
         # 扫描按钮仅对真实硬件显示
         self._scan_btn.setVisible(index in (1, 2))
 
-        # DoIP时隐藏CAN专属配置（通道/波特率/CAN地址），显示DoIP配置组
+        # DoIP时隐藏CAN专属配置（通道/波特率/CAN地址/唤醒报文），显示DoIP配置组
         self._channel_label.setVisible(not is_doip)
         self._channel_combo.parentWidget().setVisible(not is_doip)
         self._bitrate_label.setVisible(not is_doip)
         self._bitrate_combo.setVisible(not is_doip)
         self._addr_group.setVisible(not is_doip)
+        self._wake_group.setVisible(not is_doip)
         self._doip_group.setVisible(is_doip)
 
     def _on_doip_discover(self):
@@ -397,12 +524,24 @@ class ConnectionPanel(QWidget):
                 self._connected = True
                 self._connect_btn.setEnabled(False)
                 self._disconnect_btn.setEnabled(True)
-                self._status_label.setText(
-                    f"状态: 已连接 - {self._can_interface.channel_info}")
-                self._status_label.setStyleSheet("color: #4CAF50; padding: 5px;")
-                self.connection_changed.emit(True)
                 # 连接成功后自动保存配置，下次启动时自动恢复
                 self.save_to_config()
+                if (iface_type != "doip" and self._wake_auto_check.isChecked()
+                        and self._parse_wake_params(log_err=True)[0]):
+                    # 勾选"连接时自动唤醒": 总线已打开，先后台周期发唤醒帧
+                    # 约2s让休眠ECU起床，完成后再通知上层发自检（3E 00）
+                    # ——否则休眠ECU场景下自检必失败造成"连接失败"误判
+                    self._status_label.setText(
+                        "状态: 已连接 - 正在唤醒ECU（约2s）...")
+                    self._status_label.setStyleSheet(
+                        "color: #FF9800; padding: 5px;")
+                    self._start_auto_wake()
+                else:
+                    self._status_label.setText(
+                        f"状态: 已连接 - {self._can_interface.channel_info}")
+                    self._status_label.setStyleSheet(
+                        "color: #4CAF50; padding: 5px;")
+                    self.connection_changed.emit(True)
             else:
                 # 获取详细错误信息
                 self._stop_virtual_doip_ecu()
@@ -414,6 +553,74 @@ class ConnectionPanel(QWidget):
         except Exception as e:
             self._stop_virtual_doip_ecu()
             QMessageBox.critical(self, "连接错误", f"连接失败:\n{e}")
+
+    def _parse_wake_params(self, log_err: bool = False):
+        """解析唤醒参数，返回 (ok, can_id, data_bytes, period_ms)"""
+        can_id = self._wake_can_id.value()
+        data_hex = self._wake_data.text().strip().replace(" ", "")
+        if not data_hex:
+            data_hex = "FFFFFFFFFFFFFFFF"
+        try:
+            data = bytes.fromhex(data_hex)
+            if len(data) > 8:
+                if log_err:
+                    self._append_wake_log("错误: 数据长度超过8字节", "#F44336")
+                return False, 0, b"", 0
+            # 填充到8字节（CAN帧标准长度）
+            data = data + bytes(8 - len(data))
+        except ValueError:
+            if log_err:
+                self._append_wake_log("错误: HEX格式无效", "#F44336")
+            return False, 0, b"", 0
+        return True, can_id, data, self._wake_period.value()
+
+    _AUTO_WAKE_DURATION_S = 2.0
+
+    def _start_auto_wake(self):
+        """连接时自动唤醒: 后台线程周期发唤醒帧约2秒，
+        完成后经 _auto_wake_done 信号回UI线程触发上层诊断自检"""
+        ok, can_id, data, period = self._parse_wake_params(log_err=True)
+        if not ok:
+            self._on_auto_wake_done()
+            return
+        iface = self._can_interface
+        duration = self._AUTO_WAKE_DURATION_S
+        self._append_wake_log(
+            f">> 连接自动唤醒: CAN ID=0x{can_id:03X} "
+            f"数据={data.hex(' ').upper()} 周期={period}ms "
+            f"持续约{duration:.0f}s", "#2196F3")
+
+        def _run():
+            import time as _t
+            sent = 0
+            end = _t.monotonic() + duration
+            while _t.monotonic() < end and self._connected:
+                try:
+                    if iface.send(CanMessage(
+                            can_id=can_id, data=data, dlc=8)):
+                        sent += 1
+                except Exception:
+                    break
+                _t.sleep(period / 1000.0)
+            self._auto_wake_sent = sent
+            self._auto_wake_done.emit()   # 跨线程信号→UI线程
+
+        self._auto_wake_thread = threading.Thread(
+            target=_run, daemon=True, name="auto-wake")
+        self._auto_wake_thread.start()
+
+    def _on_auto_wake_done(self):
+        """自动唤醒完成: 恢复状态并通知上层执行诊断自检"""
+        self._auto_wake_thread = None
+        if not self._connected or not self._can_interface:
+            return   # 唤醒期间已断开，不再触发自检
+        sent = getattr(self, "_auto_wake_sent", 0)
+        self._append_wake_log(
+            f"<< 自动唤醒完成（发送{sent}帧），开始诊断自检", "#4CAF50")
+        self._status_label.setText(
+            f"状态: 已连接 - {self._can_interface.channel_info}")
+        self._status_label.setStyleSheet("color: #4CAF50; padding: 5px;")
+        self.connection_changed.emit(True)
 
     def _start_virtual_doip_ecu(self, port: int) -> bool:
         """启动本地虚拟DoIP ECU（回环模拟）"""
@@ -439,7 +646,16 @@ class ConnectionPanel(QWidget):
             self._virtual_doip_ecu = None
 
     def _on_disconnect(self):
+        # 断开时自动停止唤醒报文发送
+        if self._wake_running:
+            self._on_stop_wake()
         self._connected = False
+        # 等待自动唤醒线程退出（标志已清，至多再发一帧），
+        # 避免与总线关闭并发发送（PCAN新开/关闭交错会坏驱动状态）
+        th = self._auto_wake_thread
+        if th is not None and th.is_alive():
+            th.join(timeout=1.0)
+        self._auto_wake_thread = None
         self._connect_btn.setEnabled(True)
         self._disconnect_btn.setEnabled(False)
         self._status_label.setText("状态: 未连接")
@@ -500,3 +716,87 @@ class ConnectionPanel(QWidget):
     @property
     def doip_port(self) -> int:
         return self._doip_port.value()
+
+    def _on_start_wake(self):
+        """启动周期发送唤醒报文"""
+        if not self._can_interface:
+            self._append_wake_log("错误: 请先连接CAN接口", "#F44336")
+            return
+
+        # 解析CAN ID
+        self._wake_can_id_val = self._wake_can_id.value()
+
+        # 解析数据
+        data_hex = self._wake_data.text().strip().replace(" ", "")
+        if not data_hex:
+            data_hex = "FFFFFFFFFFFFFFFF"
+        try:
+            self._wake_data_bytes = bytes.fromhex(data_hex)
+            if len(self._wake_data_bytes) > 8:
+                self._append_wake_log("错误: 数据长度超过8字节", "#F44336")
+                return
+            # 填充到8字节（CAN帧标准长度）
+            self._wake_data_bytes = self._wake_data_bytes + bytes(8 - len(self._wake_data_bytes))
+        except ValueError:
+            self._append_wake_log("错误: HEX格式无效", "#F44336")
+            return
+
+        period = self._wake_period.value()
+
+        # 更新UI状态
+        self._wake_start_btn.setEnabled(False)
+        self._wake_stop_btn.setEnabled(True)
+        self._wake_can_id.setEnabled(False)
+        self._wake_data.setEnabled(False)
+        self._wake_period.setEnabled(False)
+
+        self._wake_running = True
+        self._append_wake_log(
+            f">> 启动周期唤醒: CAN ID=0x{self._wake_can_id_val:03X} "
+            f"数据={self._wake_data_bytes.hex(' ').upper()} "
+            f"周期={period}ms", "#2196F3")
+
+        # 启动定时器
+        self._wake_timer.start(period)
+
+    def _on_stop_wake(self):
+        """停止周期发送唤醒报文"""
+        self._wake_timer.stop()
+        self._wake_running = False
+
+        # 恢复UI状态
+        self._wake_start_btn.setEnabled(True)
+        self._wake_stop_btn.setEnabled(False)
+        self._wake_can_id.setEnabled(True)
+        self._wake_data.setEnabled(True)
+        self._wake_period.setEnabled(True)
+
+        self._append_wake_log("<< 停止唤醒报文发送", "#FF9800")
+
+    def _send_wake_frame(self):
+        """发送单帧唤醒报文（定时器回调）"""
+        if not self._can_interface or not self._wake_running:
+            return
+
+        try:
+            msg = CanMessage(
+                can_id=self._wake_can_id_val,
+                data=self._wake_data_bytes,
+                dlc=8
+            )
+            if self._can_interface.send(msg):
+                # 静默发送，不记录每帧日志避免刷屏
+                pass
+        except Exception as e:
+            self._append_wake_log(f"发送异常: {e}", "#F44336")
+            self._on_stop_wake()
+
+    def _append_wake_log(self, text: str, color: str = ""):
+        """追加唤醒日志"""
+        from datetime import datetime
+        ts = datetime.now().strftime("%H:%M:%S.%f")[:-3]
+        if color:
+            self._wake_log.append(
+                f'<span style="color:{color}">[{ts}] {text}</span>')
+        else:
+            self._wake_log.append(f"[{ts}] {text}")

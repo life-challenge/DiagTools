@@ -3,7 +3,7 @@
 from PyQt6.QtWidgets import (QWidget, QVBoxLayout, QHBoxLayout, QGroupBox,
                               QLabel, QPushButton, QLineEdit, QTextEdit,
                               QCheckBox, QSpinBox)
-from PyQt6.QtCore import Qt, QThread
+from PyQt6.QtCore import QThread
 from datetime import datetime
 from src.ui.async_uds import UdsWorker
 

@@ -1,0 +1,5 @@
+# 开发/CI 依赖（运行时依赖见 requirements.txt）
+ruff>=0.6
+coverage>=7.6
+openpyxl>=3.1          # 调查表解析与其单元测试
+pyinstaller>=6.0       # Windows 打包（scripts/build_exe.py）

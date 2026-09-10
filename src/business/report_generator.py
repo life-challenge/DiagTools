@@ -6,7 +6,6 @@
 
 import time
 import os
-from typing import Optional
 from src.log.log_manager import get_log_manager
 
 
@@ -150,7 +149,7 @@ tr:hover {{ background: #f5f5f5; }}
     def _generate_dtc_text(self, records, ecu_name, filepath):
         """生成DTC文本报告"""
         lines = [
-            f"DTC 诊断报告",
+            "DTC 诊断报告",
             f"时间: {time.strftime('%Y-%m-%d %H:%M:%S')}",
             f"ECU: {ecu_name}",
             f"总计: {len(records)} 个DTC",

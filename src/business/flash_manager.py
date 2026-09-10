@@ -48,6 +48,7 @@ class FlashState(IntEnum):
 # 步骤注册表: key -> (显示名称, 说明)
 STEP_REGISTRY = {
     "precheck": ("前置检查", "文件解析与校验"),
+    "wake": ("ECU 唤醒", "周期发送唤醒报文"),
     "prep_ext_session": ("扩展会话", "功能寻址 0x10 03"),
     "preprog_check": ("预编程条件检查", "0x31 01 0203"),
     "dtc_off": ("DTC设置OFF", "功能寻址 0x85 02"),
@@ -197,11 +198,20 @@ class FlashConfig:
         self.block_size = 1024
         self.erase_address = 0x08000000
         self.erase_size = 0
+        # 擦除例程参数格式字节: 部分ECU（如DEM）要求 31 01 FF00 后带
+        # 一个格式字节声明参数布局——0x44=高半字节地址长度4 + 低半字节大小长度4，
+        # 即 31 01 FF00 44 + 地址(4B) + 大小(4B)；设为0则不带格式字节
+        self.erase_format_byte = 0x44
         # 擦除块大小: 擦除一般按整块进行，擦除大小向上取整到该值的整数倍（默认0x40000）
         self.erase_block_size = 0x40000
         self.security_level = 9          # 0=跳过安全访问（量产流程常用 9，即 27 09/0A）
         self.key_generator = None        # Callable[[int, bytes], bytes] 密钥钩子 (level, seed)->key
         self.enter_programming = True    # 刷写前切换编程会话(0x10 02)
+        # 编程会话(10 02)切换后的跳转稳定等待秒数: ECU需Bootloader跳转/
+        # 编程环境初始化，立即发后续请求会被拒（7F 7F），实测DEM需2s
+        self.prog_session_delay = 2.0
+        # ECU复位(11 01)后的重启稳定等待秒数
+        self.reset_delay = 2.0
         self.reset_after_flash = True
         # V2.1: 可选步骤 —— 写入指纹（部分控制器要求，如 0x2E F15A）
         self.write_fingerprint = True
@@ -227,7 +237,13 @@ class FlashConfig:
         self.post_comm_enable = True         # 28 00 03 打开通信
         self.post_dtc_on = True              # 85 01 DTC设置ON
         self.post_default_session = True     # 10 01 默认会话
-        self.post_clear_dtc = True           # 14 FF FF FF 清除DTC
+        self.post_clear_dtc = True           # 14 FF FF FF 清除 DTC
+        # V2.2: ECU 唤醒配置（部分控制器需要先发送唤醒报文才能进行诊断）
+        self.wake_enabled = False            # 是否启用唤醒
+        self.wake_can_id = 0x160             # 唤醒报文 CAN ID
+        self.wake_data = bytes([0xFF] * 8)   # 唤醒报文数据
+        self.wake_period = 0.05              # 唤醒周期 (秒)
+        self.wake_duration = 3.0             # 唤醒持续时间 (秒)
 
 
 class FlashProgress:
@@ -267,9 +283,10 @@ class FlashProgress:
 class FlashManager:
     """刷写流程管理器（步骤序列由配置驱动）"""
 
-    # 步骤key -> FlashState
+    # 步骤 key -> FlashState
     _STEP_STATES = {
         "precheck": FlashState.PRECHECKING,
+        "wake": FlashState.PRECHECKING,
         "prep_ext_session": FlashState.PREPARE,
         "preprog_check": FlashState.PREPARE,
         "dtc_off": FlashState.PREPARE,
@@ -332,11 +349,14 @@ class FlashManager:
 
     @staticmethod
     def steps(config: FlashConfig) -> list:
-        """根据配置生成实际执行的步骤序列 [(key, 名称, 说明), ...]
-
+        """根据配置生成实际执行的步骤序列 [(key, 名称，说明), ...]
+    
         面板据此渲染步骤列表，保证与执行顺序完全一致。
         """
         seq = ["precheck"]
+        # ECU 唤醒（部分控制器需要先唤醒才能诊断）
+        if config.wake_enabled:
+            seq.append("wake")
         # 刷前准备（功能寻址）
         if config.prep_ext_session:
             seq.append("prep_ext_session")
@@ -393,9 +413,13 @@ class FlashManager:
         self._thread.start()
 
     def stop_flash(self):
-        """停止刷写"""
+        """请求停止刷写
+
+        仅置取消标志，由刷写线程在最近的取消检查点（步骤边界/块间）
+        退出并发出 CANCELLED 终态；_running 由线程 finally 统一复位，
+        避免停止后 is_running 提前变 False 导致状态判断错乱。
+        """
         self._cancelled = True
-        self._running = False
 
     def _set_state(self, state: FlashState, error_msg: str = "", key: str = ""):
         self._progress.state = state
@@ -412,6 +436,7 @@ class FlashManager:
 
         handlers = {
             "precheck": self._step_precheck,
+            "wake": self._step_wake,
             "prep_ext_session": self._step_prep_ext_session,
             "preprog_check": self._step_preprog_check,
             "dtc_off": self._step_dtc_off,
@@ -520,9 +545,67 @@ class FlashManager:
                 return False
         return True
 
+    def _step_wake(self) -> bool:
+        """ECU 唤醒：周期发送唤醒报文，持续指定时间
+
+        部分控制器（如 DEM）在休眠状态下需要先发送唤醒报文才能进行诊断。
+        通过 UDS 客户端的底层 CAN 接口直接发送原始 CAN 帧。
+        """
+        if not self._config.wake_enabled:
+            return True
+        if not self._uds_client:
+            self._logger.info("  模拟 ECU 唤醒（无真实 CAN 接口）")
+            return True
+        # 获取底层 CAN 接口
+        can_iface = getattr(self._uds_client, '_can', None)
+        if can_iface is None:
+            self._progress.error_message = "无法获取 CAN 接口，无法发送唤醒报文"
+            self._logger.error(self._progress.error_message)
+            return False
+        can_id = self._config.wake_can_id
+        data = self._config.wake_data
+        period = self._config.wake_period
+        duration = self._config.wake_duration
+        self._logger.info(
+            f"  唤醒：CAN ID=0x{can_id:03X} 数据={data.hex(' ').upper()} "
+            f"周期={period*1000:.0f}ms 持续时间={duration}s")
+        # 周期发送唤醒报文
+        from src.models.can_message import CanMessage
+        start_time = time.time()
+        sent_count = 0
+        try:
+            while time.time() - start_time < duration:
+                if self._cancelled:
+                    return False
+                msg = CanMessage(can_id=can_id, data=data, dlc=8)
+                if can_iface.send(msg):
+                    sent_count += 1
+                time.sleep(period)
+        except Exception as e:
+            self._progress.error_message = f"唤醒发送异常：{e}"
+            self._logger.error(self._progress.error_message)
+            return False
+        self._logger.info(f"  唤醒完成：共发送 {sent_count} 帧")
+        # 唤醒后等待 ECU 完全启动
+        time.sleep(0.5)
+        return True
+
     def _step_prep_ext_session(self) -> bool:
-        """刷前准备: 功能寻址进入扩展会话 (10 03)"""
-        return self._send_functional(bytes([0x10, 0x03]))
+        """刷前准备: 功能寻址进入扩展会话 (10 03)
+
+        部分控制器不响应标准功能地址0x7DF（私有网络功能地址不同），
+        功能寻址无正响应时回退物理寻址重试，避免单 ECU 刷写被阻塞。
+        """
+        if self._send_functional(bytes([0x10, 0x03])):
+            return True
+        self._logger.info("  功能寻址无正响应，回退物理寻址 10 03 重试")
+        if not self._uds_client:
+            return True
+        resp = self._uds_client.diagnostic_session_control(0x03)
+        ok = resp is not None and resp[0] == 0x50
+        if ok:
+            self._logger.info("  物理寻址 10 03 成功")
+        return ok
 
     def _step_preprog_check(self) -> bool:
         """预编程条件检查: 例程 31 01 0203（物理寻址，需等待检查结果）"""
@@ -540,14 +623,28 @@ class FlashManager:
         return self._send_functional(bytes([0x28, 0x03, 0x03]))
 
     def _step_programming_session(self) -> bool:
-        """切换编程会话 (0x10 02)"""
+        """切换编程会话 (0x10 02)
+
+        部分ECU（如DEM）切到编程会话后需内部初始化（Bootloader跳转、
+        编程环境准备），立即发后续请求会被拒（7F 7F 
+        serviceNotSupportedInActiveSession），切换后需等待稳定。
+        """
         if not self._uds_client:
             return True  # 模拟模式
         resp = self._uds_client.diagnostic_session_control(0x02)
-        return resp is not None and resp[0] == 0x50
+        ok = resp is not None and resp[0] == 0x50
+        if ok and self._config.prog_session_delay > 0:
+            self._logger.info(
+                f"  编程会话已切换，等待ECU跳转初始化稳定 "
+                f"({self._config.prog_session_delay:g}s)")
+            time.sleep(self._config.prog_session_delay)
+        return ok
 
     def _step_security_access(self) -> bool:
-        """安全访问: 请求种子 -> 计算密钥 -> 发送密钥"""
+        """安全访问: 请求种子 -> 计算密钥 -> 发送密钥
+
+        会话类NRC(7F/12/22)时ECU可能尚未就绪，等待后重试一次。
+        """
         if not self._uds_client:
             return True  # 模拟模式
         if self._config.key_generator is None:
@@ -555,7 +652,21 @@ class FlashManager:
                 f"未配置Level {self._config.security_level}的密钥算法，无法解锁")
             return False
         level = self._config.security_level
-        resp = self._uds_client.security_access_request_seed(level)
+        resp = None
+        for attempt in (1, 2):
+            resp = self._uds_client.security_access_request_seed(level)
+            if resp and resp[0] == 0x67:
+                break
+            retryable = (resp is not None and len(resp) >= 3
+                         and resp[0] == 0x7F
+                         and resp[2] in (0x7F, 0x12, 0x22))
+            if retryable and attempt == 1:
+                self._logger.info(
+                    f"  请求种子被拒(NRC=0x{resp[2]:02X})，"
+                    "等待500ms后重试")
+                time.sleep(0.5)
+            else:
+                return False
         if not resp or resp[0] != 0x67:
             return False
         seed = resp[2:]
@@ -600,12 +711,13 @@ class FlashManager:
         if bs > 0:
             size = (size + bs - 1) // bs * bs
         self._logger.info(
-            f"  擦除: 0x{self._config.erase_address:08X} +0x{size:X}"
-            f" (块大小0x{bs:X})" if bs > 0 else
             f"  擦除: 0x{self._config.erase_address:08X} +0x{size:X}")
+        # 格式字节（如0x44）声明后续参数布局: 地址4字节 + 大小4字节
+        fmt = bytes([self._config.erase_format_byte]) \
+            if self._config.erase_format_byte else b""
         resp = self._uds_client.routine_control(
             0x01, 0xFF00,
-            self._config.erase_address.to_bytes(4, 'big') +
+            fmt + self._config.erase_address.to_bytes(4, 'big') +
             size.to_bytes(4, 'big'))
         return resp is not None and resp[0] == 0x71
 
@@ -628,7 +740,10 @@ class FlashManager:
             self._config.driver_address, self._driver_info.file_size)
         if max_len is None:
             return False
-        block_size = min(self._config.driver_block_size, max_len)
+        # maxNumberOfBlockLength是整条TransferData请求的上限（含36+块序号
+        # 共2字节头），纯数据块大小需减去头部，否则单条请求超出ECU声明上限
+        block_size = min(self._config.driver_block_size, max(1, max_len - 2))
+        self._logger.info(f"  驱动块大小 {block_size} (maxBlockLength={max_len})")
         if not self._transfer_blocks(self._driver_info.data, block_size):
             return False
         resp = self._uds_client.request_transfer_exit()
@@ -650,7 +765,8 @@ class FlashManager:
 
     def _step_transfer_data(self) -> bool:
         """分块传输应用数据"""
-        block_size = min(self._config.block_size, self._max_block_len)
+        # 同驱动传输: maxNumberOfBlockLength含36+块序号2字节头，数据块需减头
+        block_size = min(self._config.block_size, max(1, self._max_block_len - 2))
         self._progress.total_blocks = (
             self._file_info.file_size + block_size - 1) // block_size
         self._logger.info(
@@ -714,16 +830,27 @@ class FlashManager:
         return resp is not None and resp[0] == 0x71
 
     def _step_reset(self) -> bool:
-        """ECU复位 (0x11 01)"""
+        """ECU复位 (0x11 01)，复位后等待重启稳定"""
         if self._uds_client:
             self._uds_client.ecu_reset(0x01)
+            if self._config.reset_delay > 0:
+                self._logger.info(
+                    f"  ECU复位已发送，等待重启稳定 "
+                    f"({self._config.reset_delay:g}s)")
+                time.sleep(self._config.reset_delay)
         return True
 
     # ---------------- 刷后恢复（功能寻址） ----------------
 
     def _step_post_ext_session(self) -> bool:
-        """刷后恢复: 功能寻址进入扩展会话 (10 03)"""
-        return self._send_functional(bytes([0x10, 0x03]))
+        """刷后恢复: 功能寻址进入扩展会话 (10 03)，失败回退物理寻址"""
+        if self._send_functional(bytes([0x10, 0x03])):
+            return True
+        self._logger.info("  功能寻址无正响应，回退物理寻址 10 03 重试")
+        if not self._uds_client:
+            return True
+        resp = self._uds_client.diagnostic_session_control(0x03)
+        return resp is not None and resp[0] == 0x50
 
     def _step_post_comm_enable(self) -> bool:
         """刷后恢复: 功能寻址打开通信 (28 00 03)"""

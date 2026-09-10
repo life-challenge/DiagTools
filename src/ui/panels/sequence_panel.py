@@ -3,11 +3,11 @@
 from PyQt6.QtWidgets import (QWidget, QVBoxLayout, QHBoxLayout, QGroupBox,
                               QLabel, QPushButton, QTableWidget, QTableWidgetItem,
                               QHeaderView, QLineEdit, QSpinBox,
-                              QCheckBox, QFileDialog, QComboBox, QFormLayout,
+                              QCheckBox, QFileDialog, QFormLayout,
                               QProgressBar, QAbstractItemView, QApplication)
-from PyQt6.QtCore import Qt, QThread, pyqtSignal
+from PyQt6.QtCore import Qt, pyqtSignal
 from PyQt6.QtGui import QColor, QMouseEvent, QFont
-from src.business.sequence_manager import SequenceManager, UdsSequence, SequenceStep, SequenceResult
+from src.business.sequence_manager import SequenceManager, UdsSequence, SequenceStep
 import threading
 
 
@@ -86,6 +86,9 @@ class SequencePanel(QWidget):
     # 注: 执行回调在后台线程发射，信号自动队列投递到GUI线程，线程安全
     business_log = pyqtSignal(str, str)
 
+    # 请求直达安全算法页（加载/管理DLL算法，供安全访问步骤计算密钥）
+    open_security_requested = pyqtSignal()
+
     def __init__(self, uds_client=None, parent=None):
         super().__init__(parent)
         self._uds_client = uds_client
@@ -96,6 +99,10 @@ class SequencePanel(QWidget):
 
     def set_uds_client(self, client):
         self._uds_client = client
+
+    def set_key_generator(self, fn):
+        """注入密钥计算钩子: fn(level, seed) -> key（安全访问步骤用）"""
+        self._seq_manager.set_key_generator(fn)
 
     def _init_ui(self):
         layout = QVBoxLayout(self)
@@ -161,21 +168,35 @@ class SequencePanel(QWidget):
         save_btn = QPushButton("保存序列")
         save_btn.clicked.connect(self._save_sequence)
         step_toolbar.addWidget(save_btn)
+
+        # 直达安全算法页（序列安全访问步骤依赖已加载的DLL算法）
+        sec_btn = QPushButton("🔐 安全算法...")
+        sec_btn.setToolTip(
+            "打开安全算法页面加载/管理DLL算法\n"
+            "序列中 27 <level> 请求会自动调用该算法完成: 请求种子→算钥→发密钥")
+        sec_btn.clicked.connect(self.open_security_requested.emit)
+        step_toolbar.addWidget(sec_btn)
         layout.addLayout(step_toolbar)
 
         # 步骤表格（支持按住行拖拽排序）
         self._table = StepTable()
         self._table.set_move_handler(self._move_step)
-        self._table.setColumnCount(8)
+        self._table.setColumnCount(9)
         self._table.setHorizontalHeaderLabels(
-            ["启用", "步骤名称", "请求HEX", "发送次数", "前延时(ms)", "后延时(ms)", "检查正响应", "结果"])
+            ["启用", "步骤名称", "请求HEX", "发送次数", "前延时(ms)", "后延时(ms)",
+             "检查正响应", "安全算法", "结果"])
         header = self._table.horizontalHeader()
         # 列宽策略: 步骤名称定宽（不再Stretch独占整行——否则请求HEX被挤窄，
         # 点击高概率误中名称列），请求HEX作为主编辑列给足宽度，结果列弹性拉伸
         for col, w in ((0, 50), (1, 110), (2, 210),
-                       (3, 76), (4, 92), (5, 92), (6, 92)):
+                       (3, 76), (4, 92), (5, 92), (6, 92), (7, 70)):
             self._table.setColumnWidth(col, w)
-        header.setSectionResizeMode(7, QHeaderView.ResizeMode.Stretch)
+        self._table.horizontalHeaderItem(7).setToolTip(
+            "安全访问步骤自动调用已加载算法(DLL/Python)完成全流程:\n"
+            "27 <level> 请求种子 → 算法计算密钥 → 27 <level+1> 发送密钥\n"
+            "请求HEX填 27 09（或发密钥 27 0A）时自动识别并调用，无需勾选；\n"
+            "勾选后强制生效（请求带额外数据时也走全流程）")
+        header.setSectionResizeMode(8, QHeaderView.ResizeMode.Stretch)
         # 加高默认行，便于精确点击与双击编辑
         self._table.verticalHeader().setDefaultSectionSize(30)
         self._table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
@@ -241,10 +262,17 @@ class SequencePanel(QWidget):
         check_cb.setChecked(data.get("check", True))
         self._table.setCellWidget(row, 6, check_cb)
 
+        sec_cb = QCheckBox()
+        sec_cb.setChecked(data.get("sec", False))
+        sec_cb.setToolTip(
+            "安全访问全流程: 请求种子→算法算钥→发密钥\n"
+            "请求HEX填 27 <level> 时会自动识别调用，无需勾选")
+        self._table.setCellWidget(row, 7, sec_cb)
+
         result_item = QTableWidgetItem(data.get("result", ""))
         if data.get("result_color"):
             result_item.setForeground(QColor(data["result_color"]))
-        self._table.setItem(row, 7, result_item)
+        self._table.setItem(row, 8, result_item)
 
     def _read_rows(self) -> list:
         """读取全部行的编辑状态（含结果列文本与颜色）"""
@@ -252,7 +280,7 @@ class SequencePanel(QWidget):
         for r in range(self._table.rowCount()):
             name_item = self._table.item(r, 1)
             hex_item = self._table.item(r, 2)
-            result_item = self._table.item(r, 7)
+            result_item = self._table.item(r, 8)
             rows.append({
                 "enabled": self._table.cellWidget(r, 0).isChecked(),
                 "name": name_item.text() if name_item else "",
@@ -261,6 +289,7 @@ class SequencePanel(QWidget):
                 "db": self._table.cellWidget(r, 4).value(),
                 "da": self._table.cellWidget(r, 5).value(),
                 "check": self._table.cellWidget(r, 6).isChecked(),
+                "sec": self._table.cellWidget(r, 7).isChecked(),
                 "result": result_item.text() if result_item else "",
                 "result_color": (result_item.foreground().color().name()
                                  if result_item else ""),
@@ -330,6 +359,7 @@ class SequencePanel(QWidget):
                 "db": step.delay_before_ms,
                 "da": step.delay_after_ms,
                 "check": step.check_positive,
+                "sec": step.security_access,
             })
         self._write_rows(rows)
 
@@ -356,6 +386,7 @@ class SequencePanel(QWidget):
             db_spin = self._table.cellWidget(row, 4)
             da_spin = self._table.cellWidget(row, 5)
             check_cb = self._table.cellWidget(row, 6)
+            sec_cb = self._table.cellWidget(row, 7)
 
             hex_str = hex_item.text() if hex_item else ""
             req_data = bytes.fromhex(hex_str.replace(" ", "")) if hex_str else b""
@@ -368,6 +399,7 @@ class SequencePanel(QWidget):
                 delay_before_ms=db_spin.value() if db_spin else 0,
                 delay_after_ms=da_spin.value() if da_spin else 0,
                 enabled=cb.isChecked() if cb else True,
+                security_access=sec_cb.isChecked() if sec_cb else False,
             )
             seq.steps.append(step)
 
@@ -386,12 +418,23 @@ class SequencePanel(QWidget):
         def step_cb(result):
             color = "#4CAF50" if result.is_positive else "#F44336"
             status = "OK" if result.is_positive else "FAIL"
+            # 失败时附带具体原因（NRC描述/超时/密钥被拒等），不再只显示FAIL
+            detail = (f" - {result.error_message}"
+                      if not result.is_positive and result.error_message else "")
             row = result.step_index
             if row < self._table.rowCount():
-                item = QTableWidgetItem(f"{status} ({result.elapsed_ms:.0f}ms)")
+                item = QTableWidgetItem(
+                    f"{status} ({result.elapsed_ms:.0f}ms){detail}")
                 item.setForeground(QColor(color))
-                self._table.setItem(row, 7, item)
-            self._log(f"  Step {row + 1}: {result.step_name} -> {status}")
+                # 悬浮提示给出完整收发报文，便于定位失败原因
+                req = result.request_sent.hex(" ").upper() \
+                    if result.request_sent else "--"
+                rsp = result.response_received.hex(" ").upper() \
+                    if result.response_received else "无响应"
+                item.setToolTip(f"TX: {req}\nRX: {rsp}\n{result.error_message}")
+                self._table.setItem(row, 8, item)
+            self._log(f"  Step {row + 1}: {result.step_name} -> {status}{detail}",
+                      "INFO" if result.is_positive else "ERROR")
 
         def finish_cb(result):
             self._exec_btn.setEnabled(True)

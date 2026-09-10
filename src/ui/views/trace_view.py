@@ -65,10 +65,12 @@ class TraceView(QWidget):
     def dbc_panel(self) -> DbcPanel:
         return self._dbc_panel
 
-    def add_frame(self, direction: str, can_id: int, data: bytes, desc: str):
-        """报文入口（与底部日志Dock同源）: CAN全量, UDS仅可解析帧"""
-        if desc:
-            self._uds_trace.add_message(direction, can_id, data, desc)
+    def add_frame(self, direction: str, can_id: int, data: bytes, desc: str,
+                  uds_msg: bytes = None, uds_desc: str = ""):
+        """报文入口（与底部日志Dock同源）: CAN全量原始帧；
+        uds_msg非None时UDS Trace记录重组后的完整UDS报文"""
+        if uds_msg is not None:
+            self._uds_trace.add_message(direction, can_id, uds_msg, uds_desc)
         # DBC信号解码追加到CAN Trace描述（已加载数据库时），不进入UDS Trace
         dbc_desc = self._dbc_panel.decode_frame(can_id, data)
         if dbc_desc:

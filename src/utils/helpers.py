@@ -1,6 +1,5 @@
 """通用辅助函数"""
 
-from typing import Optional
 
 
 def bytes_to_hex(data: bytes, separator: str = " ") -> str:

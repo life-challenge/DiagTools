@@ -4,7 +4,6 @@
 """
 
 import time
-import threading
 from typing import Optional, Callable
 from src.log.log_manager import get_log_manager
 

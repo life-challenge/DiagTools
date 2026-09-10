@@ -85,8 +85,8 @@ class EcuTreeWidget(QTreeWidget):
         connect_action = menu.addAction("连接")
         disconnect_action = menu.addAction("断开")
         menu.addSeparator()
-        scan_dtc_action = menu.addAction("扫描DTC")
-        read_did_action = menu.addAction("快速读取DID")
+        menu.addAction("扫描DTC")
+        menu.addAction("快速读取DID")
 
         action = menu.exec(event.globalPos())
         if action == connect_action:

@@ -54,7 +54,6 @@ class VirtualEcuSimulator:
             return bytes([0x7F, 0x00, 0x13])  # incorrectMessageLength
 
         sid = data[0]
-        sub_func = data[1] if len(data) > 1 else 0
 
         # 服务分发
         handlers = {
@@ -199,7 +198,6 @@ class VirtualEcuSimulator:
     def _handle_routine_control(self, data: bytes) -> bytes:
         sub_func = data[1] if len(data) > 1 else 0x01
         if len(data) >= 4:
-            routine_id = (data[2] << 8) | data[3]
             response = bytes([0x71, sub_func, data[2], data[3]])
             if sub_func == 0x03:
                 response += b"\x00\x00"  # 模拟例程结果

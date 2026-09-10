@@ -10,6 +10,7 @@
 
 import os
 import subprocess
+import sys
 from PyQt6.QtWidgets import (
     QMainWindow, QWidget, QVBoxLayout, QSplitter,
     QTabWidget, QToolBar, QStatusBar, QLabel, QMenu, QTreeWidget,
@@ -73,6 +74,13 @@ class MainWindow(QMainWindow):
         # 自检验证在线的ECU地址对集合(tx, rx): 树图标/徽章的真实依据，
         # 区别于"总线已连接"——当前ECU不响应时不应显示在线
         self._ecu_online: set = set()
+        # 会话级VIN（连接后自动读/手动编辑，断开即失效回"--"）:
+        # VIN是车辆实时信息而非工具配置，不持久化到配置文件——
+        # 否则上次连接读到的VIN会在未连接时残留显示
+        self._session_vin: str = ""
+        # UDS Trace重组器: TX/RX各自独立，从分段帧重组完整UDS报文（14229会话层）
+        self._tx_reasm = _TpReassembler()
+        self._rx_reasm = _TpReassembler()
 
         self._init_ui()
         self._init_menu()
@@ -173,6 +181,13 @@ class MainWindow(QMainWindow):
         _sm = self._diag_view.security_panel.security_manager
         self._flash_panel.set_key_generator(
             lambda level, seed: _sm.generate_key(level, seed))
+        # 测试中心同样注入安全钩子: 用例中的27 xx自动全流程
+        # （如WR组解锁前置）需要算法算钥，漏注入时收种子后无法发密钥
+        self._test_view.set_key_generator(
+            lambda level, seed: _sm.generate_key(level, seed))
+        # 刷写中心直达安全算法页（算法加载/管理与刷写安全访问共用）
+        self._flash_panel.open_security_requested.connect(
+            self._on_security_config)
 
         # ---- 底部: 可折叠日志面板（§7）----
         self._log_dock = LogDock()
@@ -232,7 +247,7 @@ class MainWindow(QMainWindow):
         veh_root = QTreeWidgetItem(self._project_tree, ["车辆"])
         veh_root.setExpanded(True)
         model = self._config.get("project.vehicle_model", "--")
-        vin = self._config.get("project.vin", "--")
+        vin = self._session_vin or "--"
         m_item = QTreeWidgetItem(veh_root, [f"车型: {model}"])
         m_item.setData(0, Qt.ItemDataRole.UserRole, "__vehicle_model__")
         v_item = QTreeWidgetItem(veh_root, [f"VIN: {vin}"])
@@ -397,14 +412,22 @@ class MainWindow(QMainWindow):
             act_edit = menu.addAction("编辑车型" if is_model else "编辑VIN")
             chosen = menu.exec(self._project_tree.mapToGlobal(pos))
             if chosen == act_edit:
-                key = "project.vehicle_model" if is_model else "project.vin"
-                text, ok = QInputDialog.getText(
-                    self, "编辑车辆信息",
-                    "车型:" if is_model else "VIN:",
-                    text=self._config.get(key, ""))
-                if ok:
-                    self._config.set(key, text.strip() or "--")
-                    self._build_project_tree()
+                if is_model:
+                    text, ok = QInputDialog.getText(
+                        self, "编辑车辆信息", "车型:",
+                        text=self._config.get("project.vehicle_model", ""))
+                    if ok:
+                        self._config.set("project.vehicle_model",
+                                         text.strip() or "--")
+                else:
+                    # VIN为会话级: 手动填的值仅本次连接有效，不持久化
+                    text, ok = QInputDialog.getText(
+                        self, "编辑车辆信息", "VIN:",
+                        text=self._session_vin)
+                    if ok:
+                        self._session_vin = text.strip()
+                self._build_project_tree()
+                self._refresh_overview_info()
 
     def _open_ecu_definition_dir(self, defn: EcuDefinition = None):
         """在资源管理器中打开ECU定义目录"""
@@ -499,7 +522,7 @@ class MainWindow(QMainWindow):
             network = "--"
         self._overview_view.set_vehicle_info(
             self._config.get("project.vehicle_model", "--"),
-            self._config.get("project.vin", "--"), network)
+            self._session_vin or "--", network)
 
     def _select_ecu_from_overview(self, defn):
         """总览拓扑双击: 选择ECU并跳转ECU诊断"""
@@ -738,7 +761,7 @@ class MainWindow(QMainWindow):
         # Security状态: 有任意等级处于解锁且未超时则显示（锁定=橙色警示）
         levels = self._diag_view.security_panel.unlocked_levels()
         if levels:
-            txt = ", ".join(f"L{l}" for l in levels)
+            txt = ", ".join(f"L{lvl}" for lvl in levels)
             sec_text = f"Unlocked ({txt})"
             self._lbl_security.setText(f"Security: {sec_text}")
             self._lbl_security.setStyleSheet(
@@ -900,6 +923,9 @@ class MainWindow(QMainWindow):
             self._set_toolbar_connected(False)
             self._conn_label.setText("未连接")
             self._conn_label.setStyleSheet("color: #888;")
+            # VIN是会话级车辆信息: 断开后失效回"--"，不残留本次读到的值
+            self._session_vin = ""
+            self._build_project_tree()
             self._refresh_overview_info()
             ecu_name = self._current_ecu.name if self._current_ecu else "--"
             self._lbl_ecu.setText(f"ECU: {ecu_name} | Offline")
@@ -949,15 +975,16 @@ class MainWindow(QMainWindow):
         读取失败静默忽略（不影响主流程）。车型无标准DID，
         仍需右键"编辑车型"手动设置。
         """
-        cur = (self._config.get("project.vin", "") or "").strip()
-        if cur and cur != "--":
+        cur = (self._session_vin or "").strip()
+        if cur:
             return
         if self._uds_client is None:
             return
         client = self._uds_client
 
         def _read():
-            return client.read_data_by_identifier(0xF190)
+            # VIN为多帧响应，真实ECU可能超过P2，用2s超时
+            return client.read_data_by_identifier(0xF190, timeout=2.0)
 
         def _on_done(resp):
             if not resp or len(resp) < 4 or resp[0] != 0x62:
@@ -965,7 +992,8 @@ class MainWindow(QMainWindow):
             vin = resp[3:].decode("ascii", errors="ignore").strip("\x00 \t\r\n")
             if not vin:
                 return
-            self._config.set("project.vin", vin)
+            # 会话级缓存，不写入持久配置（断开即失效）
+            self._session_vin = vin
             self._build_project_tree()
             self._refresh_overview_info()
             self._log_dock.log_business(f"自动读取车辆VIN: {vin}", "SUCCESS")
@@ -987,32 +1015,67 @@ class MainWindow(QMainWindow):
             self._refresh_ecu_icons()
         # 附上总线级收发计数，直接暴露"只发不收"证据
         stats = ""
+        rx_zero = False
         try:
             iface = self._connection_panel.can_interface
             if iface is not None:
                 st = iface.get_stats()
+                rx_zero = int(st.get("rx_count", 0)) == 0
                 stats = f"（总线计数 TX:{st.get('tx_count', '?')} " \
                         f"RX:{st.get('rx_count', '?')}）"
         except Exception:
             pass
-        self._log_dock.log_business(
-            f"连通性自检失败: ECU无响应{stats}，已发 3E 00 无 7E 00 回复。"
-            "RX为0说明总线无任何响应帧，请依次检查: ECU供电与唤起、"
-            "波特率（两端是否一致）、终端电阻、CAN高/低线接线、"
-            "PCAN设备指示灯", "WARNING")
+        if rx_zero:
+            # RX=0: 总线无任何响应帧，首要怀疑ECU休眠（市场需求场景）
+            self._log_dock.log_business(
+                f"连通性自检失败: ECU无响应{stats}，已发 3E 00 无 7E 00 回复。"
+                "RX为0说明ECU可能休眠或未上电。若ECU休眠，请在连接面板勾选"
+                "\"连接时自动唤醒\"后重新连接，或手动启动\"ECU唤醒报文\"发送；"
+                "若仍无响应，请检查: ECU供电、波特率（两端是否一致）、"
+                "终端电阻、CAN高/低线接线、PCAN设备指示灯", "WARNING")
+        else:
+            # 有收帧但无诊断回复: 通信物理层正常，多为地址/诊断层问题
+            self._log_dock.log_business(
+                f"连通性自检失败: 诊断无响应{stats}。总线有帧但ECU未回复"
+                "3E 00，请检查诊断请求/响应ID（0x{self._connection_panel.tx_id:03X}/"
+                "0x{self._connection_panel.rx_id:03X}）是否与ECU实际地址一致、"
+                "ECU是否处于休眠（可勾选\"连接时自动唤醒\"后重连）", "WARNING")
 
     def _on_can_message(self, direction: str, msg):
         """报文监听回调（可能在后台线程），转发到底部日志面板与报文分析工作区
 
-        DoIP与CAN的描述策略不同: DoIP诊断消息携带的是裸UDS数据
-        （无ISO-TP头），若按TP解析会把 3E/3x 开头的保活帧误判为"流控帧"
+        分层记录策略:
+        - CAN Trace: 全部原始帧（含ISO-TP分段帧FF/CF/流控帧FC、DoIP传输层报文）
+        - UDS Trace: 仅重组完成的完整UDS报文（14229会话层诊断内容），
+          TX/RX各自独立重组状态机；FC帧不进UDS Trace
         """
+        uds_msg = None
+        uds_desc = ""
         if self._connection_panel.is_doip:
-            desc = self._describe_uds(msg.data)
+            # DoIP诊断消息携带裸UDS数据（无ISO-TP头），即完整报文
+            uds_msg = msg.data
+            uds_desc = self._describe_uds(msg.data)
+            desc = uds_desc
         else:
             desc = self._describe_frame(msg.data)
-        self._log_dock.add_frame(direction, msg.can_id, msg.data, desc)
-        self._trace_view.add_frame(direction, msg.can_id, msg.data, desc)
+            # 诊断地址帧才进重组器: RX=本ECU响应地址，TX=请求/功能地址
+            func_id = getattr(self._current_ecu, "functional_tx_id",
+                              None) or 0x7DF
+            if direction == "RX":
+                is_diag = (msg.can_id == self._connection_panel.rx_id)
+                reasm = self._rx_reasm
+            else:
+                is_diag = msg.can_id in (self._connection_panel.tx_id,
+                                         func_id)
+                reasm = self._tx_reasm
+            if is_diag:
+                uds_msg = reasm.feed(msg.data)
+                if uds_msg is not None:
+                    uds_desc = self._describe_uds(uds_msg)
+        self._log_dock.add_frame(direction, msg.can_id, msg.data, desc,
+                                 uds_msg, uds_desc)
+        self._trace_view.add_frame(direction, msg.can_id, msg.data, desc,
+                                   uds_msg, uds_desc)
 
     @staticmethod
     def _describe_sid(sid: int) -> str:
@@ -1265,15 +1328,49 @@ class MainWindow(QMainWindow):
         start_dir = os.path.join(
             self._project_root(), "resources", "did_definitions")
         filepath, _ = QFileDialog.getOpenFileName(
-            self, "导入DID/DTC配置", start_dir, "JSON Files (*.json)")
+            self, "导入DID/DTC配置", start_dir,
+            "DID/DTC/调查表 (*.json *.xlsx *.xlsm);;JSON Files (*.json);;"
+            "调查表Excel (*.xlsx *.xlsm)")
         if not filepath:
             return
         self._apply_did_dtc_import(filepath, persist=True)
 
     def _apply_did_dtc_import(self, filepath: str, persist: bool = False):
-        """解析文件内容并注入DID面板或DTC面板"""
+        """解析文件内容并注入DID面板和/或DTC面板
+
+        支持: JSON（dids/dtcs键或列表）、OEM调查表xlsx
+        （自动解析服务矩阵/DID/DTC sheet; dids与dtcs同时存在时两者均导入）
+        """
         import json
         import tempfile
+
+        ext = os.path.splitext(filepath)[1].lower()
+        if ext in (".xlsx", ".xlsm"):
+            # OEM调查表Excel → 解析为调查表JSON → 递归走统一导入逻辑
+            try:
+                from src.business.survey_xlsx_parser import parse_survey_xlsx
+                data = parse_survey_xlsx(filepath)
+            except Exception as e:
+                QMessageBox.warning(self, "导入配置", f"调查表解析失败: {e}")
+                return
+            if not (data.get("dids") or data.get("dtcs")):
+                QMessageBox.warning(
+                    self, "导入配置", "调查表内未解析到DID/DTC定义")
+                return
+            with tempfile.NamedTemporaryFile(
+                    "w", suffix=".json", delete=False,
+                    encoding="utf-8") as tmp:
+                json.dump(data, tmp, ensure_ascii=False)
+                tmp_path = tmp.name
+            try:
+                # persist在递归内关闭，由外层记录原始xlsx路径
+                self._apply_did_dtc_import(tmp_path)
+            finally:
+                os.remove(tmp_path)
+            if persist:
+                self._config.set("imports.did_dtc", filepath)
+            return
+
         try:
             with open(filepath, "r", encoding="utf-8") as f:
                 data = json.load(f)
@@ -1281,45 +1378,46 @@ class MainWindow(QMainWindow):
             QMessageBox.warning(self, "导入配置", f"文件解析失败: {e}")
             return
 
-        # 内容识别: dids→DID定义, dtcs→DTC定义
-        if isinstance(data, dict):
-            if "dids" in data:
-                kind = "did"
-                did_count = self._diag_view.did_panel.import_definitions(
-                    filepath)
-                dtc_count = 0
-            elif "dtcs" in data:
-                # DTC定义管理器只认列表格式，归一化到临时文件加载
-                with tempfile.NamedTemporaryFile(
-                        "w", suffix=".json", delete=False,
-                        encoding="utf-8") as tmp:
-                    json.dump(data["dtcs"], tmp, ensure_ascii=False)
-                    tmp_path = tmp.name
-                try:
-                    dtc_count = self._diag_view.dtc_panel.import_definitions(
-                        tmp_path)
-                finally:
-                    os.remove(tmp_path)
-                kind, did_count = "dtc", 0
-            else:
-                QMessageBox.warning(
-                    self, "导入配置", "未识别的配置格式（需含 dids 或 dtcs 键）")
-                return
+        # 内容识别: dids→DID定义, dtcs→DTC定义（两者同时存在时均导入）
+        did_count = dtc_count = 0
+        imported = False
+        if isinstance(data, dict) and "dids" in data:
+            did_count = self._diag_view.did_panel.import_definitions(filepath)
+            imported = True
+        if isinstance(data, dict) and "dtcs" in data:
+            # DTC定义管理器只认列表格式，归一化到临时文件加载
+            with tempfile.NamedTemporaryFile(
+                    "w", suffix=".json", delete=False,
+                    encoding="utf-8") as tmp:
+                json.dump(data["dtcs"], tmp, ensure_ascii=False)
+                tmp_path = tmp.name
+            try:
+                dtc_count = self._diag_view.dtc_panel.import_definitions(
+                    tmp_path)
+            finally:
+                os.remove(tmp_path)
+            imported = True
         elif isinstance(data, list) and data and isinstance(data[0], dict):
             if "dtc_id" in data[0]:
                 dtc_count = self._diag_view.dtc_panel.import_definitions(
                     filepath)
-                kind, did_count = "dtc", 0
+                imported = True
             else:
                 did_count = self._diag_view.did_panel.import_definitions(
                     filepath)
-                kind, dtc_count = "did", 0
-        else:
-            QMessageBox.warning(self, "导入配置", "未识别的配置格式")
+                imported = True
+
+        if not imported:
+            QMessageBox.warning(
+                self, "导入配置", "未识别的配置格式（需含 dids 或 dtcs 键）")
             return
 
-        msg = (f"导入DID定义 {did_count} 项" if kind == "did"
-               else f"导入DTC定义 {dtc_count} 项")
+        parts = []
+        if did_count:
+            parts.append(f"DID定义 {did_count} 项")
+        if dtc_count:
+            parts.append(f"DTC定义 {dtc_count} 项")
+        msg = "导入" + "、".join(parts) if parts else "导入内容为空"
         self._log_dock.log_business(
             f"{msg}: {os.path.basename(filepath)}",
             "SUCCESS" if (did_count or dtc_count) else "ERROR")
@@ -1499,7 +1597,7 @@ class MainWindow(QMainWindow):
             "CAN连接管理: 在工具中心配置VCI与通道后使用 连接(F5)", 4000)
 
     def _on_security_config(self):
-        """工具-Security配置: 跳转高级诊断-Security Access"""
+        """工具-Security配置/刷写中心跳转: 直达ECU诊断-安全算法页"""
         self._nav.setCurrentIndex(NAV_DIAG)
         self._diag_view.open_security()
 
@@ -1635,7 +1733,8 @@ class MainWindow(QMainWindow):
 
     def _on_settings(self):
         """选项设置（§2.1: 主题等系统设置）"""
-        dlg = SettingsDialog(self._current_theme, self)
+        current_days = int(self._config.get("log.retention_days", 30))
+        dlg = SettingsDialog(self._current_theme, current_days, self)
         if dlg.exec():
             new_theme = dlg.selected_theme
             if new_theme != self._current_theme:
@@ -1643,6 +1742,12 @@ class MainWindow(QMainWindow):
                 self._apply_theme()
                 self._config.set("ui.theme", new_theme)
                 self._log_dock.log_business(f"主题切换: {new_theme}")
+            new_days = dlg.retention_days
+            if new_days != current_days:
+                self._config.set("log.retention_days", new_days)
+                self._config.save_config()
+                self._log_dock.log_business(
+                    f"日志保留天数: {new_days} 天（下次启动时生效）")
 
     # ---------------- 屏幕适配 ----------------
 
@@ -1703,3 +1808,42 @@ class MainWindow(QMainWindow):
     def log_widget(self) -> LogWidget:
         """兼容入口: 全局CAN Trace"""
         return self._log_dock.can_trace
+
+
+class _TpReassembler:
+    """轻量ISO-TP重组器（仅UI显示用）
+
+    从诊断地址的原始CAN帧重组出完整UDS报文，供UDS Trace显示
+    14229会话层的诊断内容；SF直接返回，FF+CF链重组，FC忽略。
+    与协议层transport_layer的重组逻辑独立，互不影响。
+    """
+
+    def __init__(self):
+        self._reset()
+
+    def _reset(self):
+        self._buf = bytearray()
+        self._total = 0
+
+    def feed(self, data: bytes):
+        """输入一帧诊断地址报文，返回重组完成的完整报文（未完成返回None）"""
+        if not data:
+            return None
+        pci = data[0] & 0xF0
+        if pci == 0x00:  # 单帧: 首字节低半字节为长度
+            self._reset()
+            length = data[0] & 0x0F
+            if 0 < length <= len(data) - 1:
+                return bytes(data[1:1 + length])
+        elif pci == 0x10:  # 首帧: 开始新重组（丢弃未完成的旧链）
+            self._total = ((data[0] & 0x0F) << 8) | data[1]
+            self._buf = bytearray(data[2:])
+        elif pci == 0x20:  # 连续帧: 追加，收满返回
+            if self._total:
+                self._buf += data[1:]
+                if len(self._buf) >= self._total:
+                    result = bytes(self._buf[:self._total])
+                    self._reset()
+                    return result
+        # 流控帧(0x30)与其他帧不产出UDS报文
+        return None
