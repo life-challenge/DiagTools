@@ -32,6 +32,15 @@ class SessionPanel(QWidget):
         cfg = get_config_manager()
         self._keepalive_enabled = bool(cfg.get("session.auto_tester_present", False))
         self._keepalive_interval = int(cfg.get("session.tester_present_interval_ms", 2000))
+        # 保活寻址与抑制正响应（V2.x会话保持增强）:
+        # - functional: True=按功能寻址ID广播保活（同时保活总线上所有ECU）
+        # - suppress: 抑制正响应(3E 80)，ECU不回复，总线干净（默认）
+        self._keepalive_functional = bool(
+            cfg.get("session.tester_present_functional", False))
+        self._suppress_pos = bool(
+            cfg.get("session.tester_present_suppress", True))
+        self._functional_id_dirty = False  # 用户手改过功能ID后不再跟随默认
+        self._functional_hint = None       # ECU定义提供的功能ID（CAN）
         self._init_ui()
         self._update_keepalive_status()  # 初始未连接时显示"待连接"
 
@@ -41,6 +50,7 @@ class SessionPanel(QWidget):
         if self._uds_client is not None:
             self._uds_client.stop_tester_present()
         self._uds_client = client
+        self._refresh_func_id_default()
         self._apply_keepalive()
         self._update_keepalive_status()
 
@@ -76,7 +86,7 @@ class SessionPanel(QWidget):
         self._keepalive_check = QCheckBox("自动发送 TesterPresent")
         self._keepalive_check.setChecked(self._keepalive_enabled)
         self._keepalive_check.setToolTip(
-            "勾选后周期发送 3E 80 保持当前非默认会话，\n"
+            "勾选后周期发送 3E 保持当前非默认会话，\n"
             "防止ECU S3超时（约5秒无诊断请求）自动退回默认会话")
         self._keepalive_check.toggled.connect(self._on_keepalive_toggled)
         keepalive_row.addWidget(self._keepalive_check)
@@ -90,6 +100,48 @@ class SessionPanel(QWidget):
         keepalive_row.addWidget(self._keepalive_spin)
         keepalive_row.addStretch()
         form.addRow("会话保持:", keepalive_row)
+
+        # 保活寻址: 物理寻址（仅当前ECU）或功能寻址（广播，
+        # 同时保活总线上所有ECU）。功能ID随传输层自适应——
+        # DoCAN为功能CAN ID（标准0x7DF，ECU定义可覆盖），
+        # DoIP为功能组逻辑地址（ISO 13400-2标准0xE400）
+        addr_row = QHBoxLayout()
+        self._addr_combo = QComboBox()
+        self._addr_combo.addItem("物理寻址")
+        self._addr_combo.addItem("功能寻址")
+        self._addr_combo.setCurrentIndex(1 if self._keepalive_functional else 0)
+        self._addr_combo.setToolTip(
+            "保活报文的寻址方式:\n"
+            "物理寻址——仅发给当前ECU（单点保活）;\n"
+            "功能寻址——广播到总线上所有ECU（多点保活，\n"
+            "适用于同时诊断多个ECU或刷写时保活全车）")
+        self._addr_combo.currentIndexChanged.connect(self._on_addr_mode_changed)
+        addr_row.addWidget(self._addr_combo)
+
+        self._func_id_combo = QComboBox()
+        self._func_id_combo.setEditable(True)
+        self._func_id_combo.setToolTip(
+            "功能寻址ID（hex，如 7DF / 0x7DF）:\n"
+            "DoCAN——功能请求CAN ID，标准0x7DF;\n"
+            "DoIP——功能组逻辑地址，标准0xE400 (ISO 13400-2)，\n"
+            "如填0x7DF会自动映射为0xE400")
+        le = self._func_id_combo.lineEdit()
+        le.editingFinished.connect(self._on_func_id_edited)
+        self._refresh_func_id_default()
+        self._func_id_combo.setEnabled(self._keepalive_functional)
+        addr_row.addWidget(self._func_id_combo)
+        form.addRow("保活寻址:", addr_row)
+
+        # 抑制正响应: 3E 80（ECU不回复，总线干净）。默认抑制;
+        # 取消抑制发送3E 00，可从响应确认ECU仍在（但会占用总线）
+        self._suppress_check = QCheckBox("抑制正响应 (3E 80)")
+        self._suppress_check.setChecked(self._suppress_pos)
+        self._suppress_check.setToolTip(
+            "勾选: 发送 3E 80，ECU不回复正响应，总线流量最小（推荐）;\n"
+            "取消勾选: 发送 3E 00，ECU回复 7E 00，可确认保活报文\n"
+            "被ECU正常接收（功能寻址多ECU时会有多个响应交错）")
+        self._suppress_check.toggled.connect(self._on_suppress_toggled)
+        form.addRow("正响应:", self._suppress_check)
 
         session_group.setLayout(form)
         layout.addWidget(session_group)
@@ -157,26 +209,156 @@ class SessionPanel(QWidget):
             self._apply_keepalive()
             self._update_keepalive_status()
 
+    def _on_addr_mode_changed(self, index: int):
+        """寻址方式切换: 物理单点/功能广播，持久化并刷新保活"""
+        self._keepalive_functional = (index == 1)
+        cfg = get_config_manager()
+        cfg.set("session.tester_present_functional", self._keepalive_functional)
+        cfg.save_config()
+        self._func_id_combo.setEnabled(self._keepalive_functional)
+        self._apply_keepalive()
+        self._update_keepalive_status()
+        if self._keepalive_functional:
+            self._log(f"保活切换为功能寻址 0x{self._current_functional_id():04X} "
+                      f"(广播总线上所有ECU)")
+        else:
+            self._log("保活切换为物理寻址 (仅当前ECU)")
+
+    def _on_func_id_edited(self):
+        """功能ID手改: 校验hex后归一化显示并持久化"""
+        text = self._func_id_combo.currentText().strip()
+        try:
+            value = int(text, 16)
+        except ValueError:
+            self._log(f"功能寻址ID无效: {text!r}，已回退上次有效值")
+            self._functional_id_dirty = False  # 放弃手改，回退保存值/默认
+            self._refresh_func_id_default()
+            return
+        if not (0 < value <= 0x1FFFFFFF):
+            self._log(f"功能寻址ID超范围: {text!r}，已回退上次有效值")
+            self._functional_id_dirty = False
+            self._refresh_func_id_default()
+            return
+        self._functional_id_dirty = True  # 手改后不再跟随传输层/ECU默认
+        width = 4 if value > 0xFFFF else 3
+        self._func_id_combo.setCurrentText(f"0x{value:0{width}X}")
+        cfg = get_config_manager()
+        cfg.set("session.tester_present_functional_id", f"0x{value:0{width}X}")
+        cfg.save_config()
+        self._apply_keepalive()
+        self._update_keepalive_status()
+
+    def _on_suppress_toggled(self, checked: bool):
+        """抑制正响应切换: 持久化并刷新保活"""
+        self._suppress_pos = checked
+        cfg = get_config_manager()
+        cfg.set("session.tester_present_suppress", checked)
+        cfg.save_config()
+        self._apply_keepalive()
+        self._update_keepalive_status()
+        self._log("保活正响应已抑制 (3E 80)" if checked
+                  else "保活正响应已取消抑制 (3E 00，ECU将回复7E 00)")
+
     def _apply_keepalive(self):
-        """按当前开关状态启停底层保活定时器"""
+        """按当前开关状态启停底层保活定时器（含寻址/抑制参数）"""
         if self._uds_client is None:
             return
         if self._keepalive_enabled:
-            self._uds_client.start_tester_present(self._keepalive_interval)
+            self._uds_client.functional_id = self._current_functional_id()
+            self._uds_client.start_tester_present(
+                self._keepalive_interval,
+                suppress=self._suppress_pos,
+                functional=self._keepalive_functional)
         else:
             self._uds_client.stop_tester_present()
 
     def _update_keepalive_status(self):
-        """刷新保活状态标签（暂停时显示暂停中）"""
+        """刷新保活状态标签（含寻址/抑制摘要，暂停时显示暂停中）"""
+        desc = self._keepalive_desc()
         if not self._keepalive_enabled:
             self._keepalive_label.setText("未启用")
         elif self._uds_client is None:
-            self._keepalive_label.setText(f"待连接 ({self._keepalive_interval} ms)")
+            self._keepalive_label.setText(
+                f"待连接 ({self._keepalive_interval} ms · {desc})")
         elif self._uds_client._tester_present_running:
             self._keepalive_label.setText(
-                f"运行中 ({self._keepalive_interval} ms)")
+                f"运行中 ({self._keepalive_interval} ms · {desc})")
         else:
-            self._keepalive_label.setText(f"已暂停 ({self._keepalive_interval} ms)")
+            self._keepalive_label.setText(
+                f"已暂停 ({self._keepalive_interval} ms · {desc})")
+
+    def _keepalive_desc(self) -> str:
+        """保活配置摘要，如 '3E 80 · 功能 0x7DF'"""
+        sf = "80" if self._suppress_pos else "00"
+        if self._keepalive_functional:
+            fid = self._current_functional_id()
+            width = 4 if fid > 0xFFFF else 3
+            return f"3E {sf} · 功能 0x{fid:0{width}X}"
+        return f"3E {sf} · 物理"
+
+    # ---------------- 功能寻址ID自适应 ----------------
+
+    def _is_doip(self) -> bool:
+        """当前连接是否为DoIP传输（功能ID默认值与提示不同）"""
+        if self._uds_client is None:
+            return False
+        tp = self._uds_client.transport_layer
+        return getattr(tp, "interface_name", "") == "DoIP"
+
+    def set_functional_id_hint(self, value):
+        """ECU定义提供功能寻址ID默认（DoCAN；DoIP固定标准功能组）"""
+        self._functional_hint = value
+        self._refresh_func_id_default()
+
+    def _default_func_id_text(self) -> str:
+        """功能ID默认值: 连接面板/ECU定义hint优先，无hint用标准默认
+
+        DoIP→功能组逻辑地址（连接面板可配，如0xE500）；
+        DoCAN→ECU定义功能CAN ID/标准0x7DF。连接后hint由主窗口
+        从连接面板传入（按硬件类型适配后的语义值）
+        """
+        hint = self._functional_hint
+        if self._is_doip():
+            if hint and hint <= 0xFFFF:
+                return f"0x{hint:04X}"
+            return "0xE400"  # DoIP标准功能组逻辑地址（ISO 13400-2）
+        if hint:
+            return f"0x{hint:03X}"
+        return "0x7DF"  # DoCAN标准功能请求ID
+
+    def _refresh_func_id_default(self):
+        """刷新功能ID输入框: 用户配置 > 传输层/ECU默认"""
+        if not hasattr(self, "_func_id_combo"):
+            return
+        if self._functional_id_dirty:
+            return  # 本次会话手改过，保持用户输入
+        cfg = get_config_manager()
+        saved = str(cfg.get("session.tester_present_functional_id", "") or "").strip()
+        if saved:
+            try:
+                value = int(saved, 16)
+            except ValueError:
+                value = None
+            if value:
+                width = 4 if value > 0xFFFF else 3
+                self._func_id_combo.setCurrentText(f"0x{value:0{width}X}")
+                return
+        default = self._default_func_id_text()
+        self._func_id_combo.setCurrentText(default)
+
+    def _current_functional_id(self) -> int:
+        """当前生效的功能寻址ID（输入无效时回退默认）"""
+        text = self._func_id_combo.currentText().strip() \
+            if hasattr(self, "_func_id_combo") else ""
+        try:
+            value = int(text, 16)
+        except ValueError:
+            value = None
+        if value:
+            return value
+        if self._is_doip():
+            return 0xE400
+        return self._functional_hint or 0x7DF
 
     def _maybe_hint_keepalive(self, session_type: int):
         """切入非默认会话且未开保活时提示，防S3超时退回"""

@@ -10,11 +10,15 @@
             "scaling", "offset", "unit", "access", "security"}],
       # access: r/w/rw; security: Level1/LevelFBL/N（写入所需安全等级）
   "dtcs": [{"dtc_id", "description"}],       # DTC定义表（dtc_manager）
+  "io_dids": [{"id", "name", "description", "control_parameter",
+               "bits": [{"bit", "name", "off", "on"}]}],
+      # 4_2 IO控制DID表（IO面板的I/O DID List，位级控制明细）
 }
 
 sheet识别按表头关键词（兼容sheet改名/增删）:
 - 服务矩阵: 表头含 "Service ID"        （1_1应用服务 / 1_2 Boot服务）
 - DID列表:  表头含 "DID Num"+"Conversion"（4_1读写DID; 4_2 IO表无Conversion不误判）
+- IO DID:   表头含 "InputOutputControlParameter"（4_2 IO控制DID，位级控制）
 - DTC列表:  表头含 "DTC Display"       （3_1 DTC信息）
 - 例程列表: 表头含 "RoutineDID"        （4_3例程控制）
 - 带删除线的行（OEM标记废弃条目）全部剔除: 服务/DID/DTC/例程均不统计
@@ -64,9 +68,19 @@ def _parse_int(text, default=None):
 
 
 def _parse_float(text):
-    """转float，'-'或空返回None"""
+    """转float，'-'或空返回None
+
+    兼容调查表范围列的hex写法（'0x0F'）与整数文本（'02'）
+    """
+    s = _clean(text)
+    if not s or s.strip() in ("-", "—", "N/A"):
+        return None
     try:
-        return float(_clean(text))
+        return float(s)
+    except (ValueError, TypeError):
+        pass
+    try:
+        return float(int(s, 16))   # '0x0F' / '00'→0（与DID列同形）
     except (ValueError, TypeError):
         return None
 
@@ -113,6 +127,43 @@ def _parse_conversion(text: str):
     scaling = float(m.group(1))
     offset = float(m.group(2)) if m.group(2) else 0.0
     return scaling, offset
+
+
+def _parse_enum_content(text: str):
+    """Data Content单行 → (枚举值int, 描述str)；非枚举行返回 (None, 原行)
+
+    支持调查表两种枚举写法:
+      '0：默认' / '1：剩余保养里程重置'  （值：描述，中英文冒号）
+      '0x01: 已学习 (Has been learning)'  （hex值: 描述）
+    """
+    m = re.match(
+        r"^\s*(?:0[xX])?([0-9A-Fa-f]{1,4})\s*[:：]\s*(.+)$", text)
+    if not m:
+        return None, text
+    try:
+        value = int(m.group(1), 16)
+    except ValueError:
+        return None, text
+    return value, m.group(2).strip()
+
+
+def _collect_enum_lines(text: str, target: dict) -> int:
+    """多行Data Content文本 → 枚举行收编到target（单格多行也支持）
+
+    调查表枚举可整块在一个单元格（'0：默认\n1：剩余'）
+    或跨多行（每个Bit/值一行）；返回收编的枚举个数。
+    非枚举行（普通描述/hex示例序列）不命中（值后需跟冒号）。
+    """
+    n = 0
+    for line in str(text).splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        v, d = _parse_enum_content(line)
+        if v is not None and d:
+            target[v] = d
+            n += 1
+    return n
 
 
 def _map_data_type(text: str) -> str:
@@ -381,6 +432,8 @@ def _parse_did_sheet(ws, dids: list, skipped: list):
     dtype_col = _col(cells, "Data Type")
     sec_col = _col(cells, "Security Level")
     cmt_col = _col(cells, "Comments")
+    # Bit位段列（'0~3'/'4~7'）：位段子字段的切分依据
+    bit_col = _col(cells, "Bit")
     # 应用程序会话权限列: 表头“Application Software(Diagnostic Session)”
     # 下方的会话ID子表头行（如 0x01/0x03）→ (列号, 会话ID)升序
     app_cols = _session_cols(ws, hrow, "Application Software")
@@ -419,6 +472,10 @@ def _parse_did_sheet(ws, dids: list, skipped: list):
             desc = _first_line(cell(row, desc_col))
             dtype_text = cell(row, dtype_col)
             scaling, offset = _parse_conversion(cell(row, conv_col))
+            # 单位列'-'/'—'为占位符（无单位），归一化为空串
+            unit = cell(row, unit_col)
+            if unit.strip() in ("-", "—", "N/A"):
+                unit = ""
             cur = {
                 "id": f"0x{did_id:04X}",
                 "name": re.sub(r"[^\w]", "_", desc) or f"DID_{did_id:04X}",
@@ -427,26 +484,133 @@ def _parse_did_sheet(ws, dids: list, skipped: list):
                 "data_type": _map_data_type(dtype_text),
                 "scaling": scaling,
                 "offset": offset,
-                "unit": cell(row, unit_col),
+                "unit": unit,
                 "min_val": _parse_float(cell(row, min_col)),
                 "max_val": _parse_float(cell(row, max_col)),
                 "group": "survey",
                 "access": access_of(row),
                 "_sub_fields": [],
+                "_enum_map": {},
+                "_bit_fields": [],
                 "_dtype_text": dtype_text,
                 "_sec": cell(row, sec_col),
                 "_comment": _first_line(cell(row, cmt_col)),
             }
         if cur is not None:
-            # 同一DID的多行位/字节描述 → 合并子数据名
-            sub = cell(row, content_col) if did_text == "" else ""
-            if sub and sub not in cur["_sub_fields"]:
-                cur["_sub_fields"].append(_first_line(sub))
+            # 同一DID的Data Content: 枚举行（值：描述，单格多行或跨行）
+            # 收编为枚举映射，解码时命中即显示语义文本；
+            # 非枚举续行仍作为子字段描述
+            content_text = cell(row, content_col)
+            if content_text:
+                # 位段子字段: Bit列有位段范围（'0~3'）或单bit
+                # （'Bit 7'，如3200灯光控制逐位定义）时，
+                # 单元格非枚举行为子字段名（首行英文+次行中文双语）、
+                # 枚举行为该段枚举 → bit_fields。
+                # 如0600: bit0~3前轮学习状态 + bit4~7后轮学习状态，
+                # 各自'0x01已学习/0x02未学习'；如3200: Bit7~Bit0
+                # 各路灯光输出（枚举由4_2表OFF/ON补齐）
+                bt = cell(row, bit_col).strip() if bit_col is not None else ""
+                bm = re.match(r"^(\d+)\s*[~～\-]\s*(\d+)$", bt)
+                sm = re.match(r"^Bit\s*(\d+)$", bt, re.IGNORECASE)
+                if bm or sm:
+                    lo, hi = ((int(bm.group(1)), int(bm.group(2)))
+                              if bm else (int(sm.group(1)),) * 2)
+                    lines = [l.strip() for l in content_text.split("\n")
+                             if l.strip()]
+                    names, seg_enum = [], {}
+                    for ln in lines:
+                        v, d = _parse_enum_content(ln)
+                        if v is not None:
+                            seg_enum[v] = d
+                        elif len(names) < 2:
+                            names.append(ln)   # 首两行非枚举=双语子字段名
+                    cur["_bit_fields"].append({
+                        "name": " ".join(names), "bit_text": bt,
+                        "lo": lo, "hi": hi,
+                        "enum_map": seg_enum,
+                    })
+                n_enum = _collect_enum_lines(content_text, cur["_enum_map"])
+                if n_enum == 0 and did_text == "":
+                    sub = _first_line(content_text)
+                    if sub and sub not in cur["_sub_fields"]:
+                        cur["_sub_fields"].append(sub)
             if not did_text and cell(row, dtype_col) and not cur["_dtype_text"]:
                 cur["_dtype_text"] = cell(row, dtype_col)
                 cur["data_type"] = _map_data_type(cell(row, dtype_col))
     if cur is not None:
         _finish_did(cur, dids)
+
+
+def _parse_io_sheet(ws, io_dids: list, skipped: list):
+    """IO DID列表sheet（4_2）→ io_dids条目（供IO控制面板的I/O DID List）
+
+    表结构: 主表头（DID Number/Command Description/
+    InputOutputControlParameter/Message Example）+ 子表头
+    （Bit/Sub Data Name/"0"/"1"）；每个DID下多行Bit控制位描述，
+    DID列合并单元格仅首行有值（向下填充由解析循环内的cur承接）。
+    尾部备注行DID列为长文本，不匹配hex模式自动跳过。
+    """
+    hrow, cells = _find_header(ws, "DID Number")
+    if hrow is None:
+        skipped.append((ws.title, "IO表未找到DID Number表头"))
+        return
+    did_col = _col(cells, "DID Number")
+    desc_col = _col(cells, "Command Description")
+    param_col = _col(cells, "InputOutputControlParameter")
+    example_col = _col(cells, "Message Example")
+    # 子表头行（Size/Byte/Bit/Sub Data Name/"0"/"1"）
+    sub_cells = []
+    for row in ws.iter_rows(min_row=hrow + 1, max_row=hrow + 1,
+                             values_only=True):
+        sub_cells = [_clean(c) for c in row]
+        break
+    bit_col = _col(sub_cells, "Bit", forbid=("Size",))
+    sub_col = _col(sub_cells, "Sub Data Name")
+    # "0"/"1"两列紧跟Sub Data Name之后（OFF/ON语义）
+    off_col = (sub_col + 1) if sub_col is not None else None
+    on_col = (sub_col + 2) if sub_col is not None else None
+
+    def cell(row, col):
+        return _cell_text(row[col]) if col is not None and col < len(row) else ""
+
+    cur = None
+    for row in ws.iter_rows(min_row=hrow + 2):
+        if _row_strike(row):
+            continue  # 删除线条目已废弃（含Bit描述续行）
+        did_text = cell(row, did_col).replace("0x", "").replace("0X", "")
+        if re.fullmatch(r"[0-9A-Fa-f]{1,4}", did_text):
+            did_id = int(did_text, 16)
+            if cur is not None:
+                io_dids.append(cur)
+            desc = _one_line(cell(row, desc_col))
+            # 控制参数 "0x03(调整)" → hex码 + 原文
+            param_text = _clean(cell(row, param_col))
+            m = re.search(r"0[xX][0-9A-Fa-f]{1,2}", param_text)
+            cur = {
+                "id": f"0x{did_id:04X}",
+                "name": re.sub(r"[^\w]", "_", _first_line(
+                    cell(row, desc_col))) or f"IO_DID_{did_id:04X}",
+                "description": desc,
+                "control_parameter": m.group(0) if m else "",
+                "control_parameter_text": param_text,
+                "example": _one_line(cell(row, example_col)),
+                "bits": [],
+            }
+        if cur is not None:
+            # Bit控制位描述行（4_2表首行即含Bit 7，与4_1表首行无子字段不同）
+            bit_text = _clean(cell(row, bit_col))
+            sub_name = _one_line(cell(row, sub_col))
+            if bit_text or sub_name:
+                bm = re.search(r"(\d+)", bit_text)
+                cur["bits"].append({
+                    "bit": int(bm.group(1)) if bm else None,
+                    "bit_text": bit_text,
+                    "name": sub_name,
+                    "off": _one_line(cell(row, off_col)),
+                    "on": _one_line(cell(row, on_col)),
+                })
+    if cur is not None:
+        io_dids.append(cur)
 
 
 def _session_cols(ws, hrow: int, app_keyword: str) -> list:
@@ -480,7 +644,8 @@ def _session_cols(ws, hrow: int, app_keyword: str) -> list:
 def _finish_did(cur: dict, dids: list):
     """整理单个DID条目并追加（内部字段收编进description）"""
     desc = cur["description"]
-    if len(cur["_sub_fields"]) > 1:
+    if len(cur["_sub_fields"]) > 1 and not cur.get("_bit_fields"):
+        # 位段子字段已结构化保留（bit_fields），描述不再重复拼接
         desc += "（含: " + "、".join(cur["_sub_fields"][:8]) + "）"
     if "BCD" in cur["_dtype_text"].upper():
         desc += "（BCD编码）"
@@ -491,7 +656,14 @@ def _finish_did(cur: dict, dids: list):
     if cur["_comment"]:
         desc += f"；{cur['_comment']}"
     cur["description"] = desc
-    for key in ("_sub_fields", "_dtype_text", "_sec", "_comment"):
+    # Data Content枚举映射（值→描述）: 供解码时显示语义文本
+    if cur["_enum_map"]:
+        cur["enum_map"] = dict(cur["_enum_map"])
+    # 位段子字段（带各自枚举）: 供解码时按位段切分显示语义
+    bf = cur.pop("_bit_fields", [])
+    if bf:
+        cur["bit_fields"] = bf
+    for key in ("_sub_fields", "_enum_map", "_dtype_text", "_sec", "_comment"):
         cur.pop(key)
     dids.append(cur)
 
@@ -587,6 +759,7 @@ def parse_survey_xlsx(file_path: str) -> dict:
 
     logger = get_log_manager().get_app_logger()
     services, dids, dtcs, skipped = [], [], [], []
+    io_dids = []
     flags = {}  # 跨sheet声明标志（如 preprog_required）
 
     wb = openpyxl.load_workbook(file_path, data_only=True, read_only=True)
@@ -604,6 +777,8 @@ def parse_survey_xlsx(file_path: str) -> dict:
                     _parse_dtc_sheet(ws, dtcs, skipped)
                 elif kind == "routine":
                     _parse_routine_sheet(ws, services, skipped)
+                elif kind == "io":
+                    _parse_io_sheet(ws, io_dids, skipped)
             except Exception as e:  # 单sheet异常不中断整体解析
                 logger.warning("调查表sheet %s 解析失败: %s", ws.title, e)
                 skipped.append((ws.title, f"sheet解析异常: {e}"))
@@ -620,13 +795,78 @@ def parse_survey_xlsx(file_path: str) -> dict:
         uniq_services.append(s)
     services = uniq_services
 
+    # 4_2表I/O DID的OFF/ON枚举合并进dids同ID条目的位段:
+    # 4_1表提供Bit级子字段结构（如3200 Bit7~Bit0各路灯光），
+    # 4_2表提供每位的0:OFF/1:ON语义——合并后所有IO DID的读取
+    # 响应都能按位解码（DID面板/数据流/did_manager共用定义库）。
+    # 4_1缺该DID时（理论上不应发生）从4_2直接生成定义。
+    if io_dids:
+        io_map = {}
+        for e in io_dids:
+            try:
+                io_map[int(str(e.get("id", "0x0")), 16)] = e
+            except ValueError:
+                continue
+        did_ids = set()
+        for d in dids:
+            try:
+                did_ids.add(int(str(d.get("id", "0x0")), 16))
+            except ValueError:
+                continue
+        for did_id, entry in io_map.items():
+            bits = {b.get("bit"): b for b in entry.get("bits") or []
+                    if b.get("bit") is not None}
+            if did_id in did_ids:
+                for d in dids:
+                    try:
+                        if int(str(d.get("id", "0x0")), 16) != did_id:
+                            continue
+                    except ValueError:
+                        continue
+                    for f in d.get("bit_fields") or []:
+                        b = bits.get(f.get("lo"))
+                        if (b and f.get("lo") == f.get("hi")
+                                and not f.get("enum_map")
+                                and (b.get("off") or b.get("on"))):
+                            # 单bit段补0:OFF/1:ON枚举（4_2表语义）
+                            f["enum_map"] = {
+                                0: b.get("off") or "OFF",
+                                1: b.get("on") or "ON",
+                            }
+                    break
+            else:
+                # 4_1缺该IO DID → 从4_2生成基础定义（uint×1字节+位段）
+                bfs = []
+                for bit_no in sorted(bits, reverse=True):
+                    b = bits[bit_no]
+                    if b.get("off") or b.get("on"):
+                        bfs.append({
+                            "name": b.get("name") or f"Bit{bit_no}",
+                            "bit_text": f"Bit {bit_no}",
+                            "lo": bit_no, "hi": bit_no,
+                            "enum_map": {0: b.get("off") or "OFF",
+                                         1: b.get("on") or "ON"},
+                        })
+                if bfs:
+                    dids.append({
+                        "id": f"0x{did_id:04X}",
+                        "name": entry.get("name") or f"IO_DID_{did_id:04X}",
+                        "description": entry.get("description") or "",
+                        "data_length": 1, "data_type": "uint",
+                        "scaling": 1.0, "offset": 0.0, "unit": "",
+                        "min_val": None, "max_val": None,
+                        "group": "survey", "access": "rw",
+                        "bit_fields": bfs,
+                    })
+
     result = {
         "_source": os.path.basename(file_path),
         "_comment": "由OEM诊断调查表xlsx解析生成: services供测试中心生成用例，"
-                    "dids/dtcs供DID/DTC定义导入",
+                    "dids/dtcs供DID/DTC定义导入，io_dids供IO控制面板",
         "services": services,
         "dids": dids,
         "dtcs": dtcs,
+        "io_dids": io_dids,
         "_skipped": skipped,
     }
     # 预编程条件检查配置: 调查表10 02行NRC声明0x22时自动输出
@@ -639,9 +879,10 @@ def parse_survey_xlsx(file_path: str) -> dict:
                            "NRC 0x22 conditionsNotCorrect），否则切换被拒",
         }
         logger.info("调查表声明预编程条件检查: 10 02前需先发 31 01 02 03")
-    logger.info("调查表解析完成 %s: 服务 %d 项 / DID %d 个 / DTC %d 个 / 跳过 %d 项",
+    logger.info("调查表解析完成 %s: 服务 %d 项 / DID %d 个 / DTC %d 个 / "
+                "I/O DID %d 个 / 跳过 %d 项",
                 os.path.basename(file_path), len(services), len(dids),
-                len(dtcs), len(skipped))
+                len(dtcs), len(io_dids), len(skipped))
     return result
 
 

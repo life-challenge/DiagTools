@@ -14,12 +14,12 @@ import csv
 from PyQt6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QPushButton, QLabel, QLineEdit,
     QSpinBox, QCheckBox, QTableWidget, QTableWidgetItem, QHeaderView,
-    QFileDialog, QSplitter, QAbstractItemView
+    QSplitter, QAbstractItemView
 )
 from PyQt6.QtCore import Qt, pyqtSignal
 from src.business.did_manager import DidManager, DidValue
 from src.ui.widgets.trend_chart import TrendChart
-from src.utils.paths import get_project_root, get_resource_path
+from src.utils.paths import get_project_root
 
 # 数据录制输出目录: <项目根>/data_recordings（打包后为exe旁边）
 _RECORD_DIR = os.path.join(get_project_root(), "data_recordings")
@@ -64,11 +64,6 @@ class DataStreamPanel(QWidget):
         add_btn = QPushButton("添加")
         add_btn.clicked.connect(self._add_did)
         bar.addWidget(add_btn)
-
-        import_btn = QPushButton("从定义导入")
-        import_btn.setToolTip("从DID定义JSON导入全部信号")
-        import_btn.clicked.connect(self._import_definitions)
-        bar.addWidget(import_btn)
 
         remove_btn = QPushButton("移除选中")
         remove_btn.clicked.connect(self._remove_selected)
@@ -150,21 +145,19 @@ class DataStreamPanel(QWidget):
         self._add_source(did_id)
         self._did_edit.clear()
 
-    def _import_definitions(self):
-        """从DID定义JSON导入全部信号"""
-        start_dir = get_resource_path("did_definitions")
-        filepath, _ = QFileDialog.getOpenFileName(
-            self, "加载DID定义", start_dir, "JSON Files (*.json)")
-        if not filepath:
-            return
-        count = self._did_manager.load_definitions_from_json(filepath)
-        if count <= 0:
-            self._status_label.setText("导入失败: 未解析到有效DID定义")
-            self._status_label.setStyleSheet("color: #F44336;")
-            return
+    def sync_definitions(self, definitions: dict):
+        """同步外部定义库的DID定义（定义库统一导入入口调用），
+
+        手动添加DID时即可显示名称/单位"""
+        for defn in definitions.values():
+            self._did_manager.add_definition(defn)
+
+    def add_all_definitions(self):
+        """将当前DID定义全部加入采集列表（定义库统一入口调用）"""
         for did_id in sorted(self._did_manager.definitions):
             self._add_source(did_id)
-        self._status_label.setText(f"已导入 {count} 个定义")
+        count = len(self._did_manager.definitions)
+        self._status_label.setText(f"已加入 {count} 个信号")
         self._status_label.setStyleSheet("color: #4CAF50;")
 
     def _add_source(self, did_id: int):

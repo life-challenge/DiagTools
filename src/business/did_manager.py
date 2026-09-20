@@ -23,7 +23,8 @@ class DidDefinition:
                  scaling: float = 1.0, offset: float = 0.0,
                  unit: str = "", min_val: float = None, max_val: float = None,
                  group: str = "default", byte_order: str = "big",
-                 struct_format: str = ""):
+                 struct_format: str = "", enum_map: dict = None,
+                 bit_fields: list = None):
         self.did_id = did_id
         self.name = name
         self.description = description
@@ -37,6 +38,13 @@ class DidDefinition:
         self.group = group
         self.byte_order = byte_order  # big/little
         self.struct_format = struct_format
+        # 枚举映射（调查表Data Content的“值：描述”行，如
+        # {1: "剩余保养里程重置"}）: 解码命中即显示语义文本
+        self.enum_map = dict(enum_map) if enum_map else {}
+        # 位段子字段（调查表Bit列有位段范围且各有枚举，如0600
+        # bit0~3前轮学习状态+bit4~7后轮）：[{name, bit_text,
+        # lo, hi, enum_map}]，解码时按位段切分显示语义
+        self.bit_fields = [dict(b) for b in bit_fields] if bit_fields else []
 
     def to_dict(self) -> dict:
         return {
@@ -53,6 +61,15 @@ class DidDefinition:
             "group": self.group,
             "byte_order": self.byte_order,
             "struct_format": self.struct_format,
+            # enum_map int键JSON无法序列化，转str存储
+            "enum_map": {str(k): v for k, v in self.enum_map.items()} \
+                if self.enum_map else {},
+            # 位段子字段（含各段枚举，int键同样转str）
+            "bit_fields": [
+                {**f, "enum_map": {str(k): v for k, v in f.get("enum_map",
+                                                            {}).items()}}
+                for f in self.bit_fields
+            ] if self.bit_fields else [],
         }
 
     @staticmethod
@@ -77,6 +94,14 @@ class DidDefinition:
             group=d.get("group", "default"),
             byte_order=d.get("byte_order", "big"),
             struct_format=d.get("struct_format", ""),
+            enum_map={int(k, 0) if isinstance(k, str) else k: v
+                      for k, v in (d.get("enum_map") or {}).items()},
+            bit_fields=[
+                {**f, "enum_map": {
+                    int(k, 0) if isinstance(k, str) else k: v
+                    for k, v in (f.get("enum_map") or {}).items()}}
+                for f in (d.get("bit_fields") or [])
+            ],
         )
 
 
@@ -158,13 +183,52 @@ class DidValue:
         if dtype == 'ascii':
             return self.ascii_value
         elif dtype in ('uint', 'int', 'float') or sized:
+            # 超过4字节的整数（密钥/MAC/网络配置字等多字节字段）
+            # 无标量意义，按HEX分组显示——大端整数以科学计数法显示失真
+            if dtype != 'float' and len(self.raw_data) > 4:
+                return self.raw_data.hex(' ').upper()
+            # 位段子字段解码（多段且至少一段有枚举即启用）:
+            # 按Bit段切分后各自查枚举，0x11 → 前轮: 已学习; 后轮: 已学习;
+            # 3200 → 近光灯输出: ON; 远光灯输出: OFF; …（逐位IO控制）。
+            # 无枚举段与保留位段（Reserved/预留）跳过；全部段无枚举
+            # （如0803传感器ID）不启用；单段（F200整字节）走原链路
+            # 保留单位/换算
+            bfs = self.definition.bit_fields
+            if len(bfs) > 1 and dtype in ('uint', 'int'):
+                raw = int(self.raw_value)
+                parts = []
+                for f in bfs:
+                    if not f.get("enum_map"):
+                        continue   # 无枚举段（保留位/纯数值）不显示
+                    nm = f.get("name") or f.get("bit_text") or \
+                        f"bit{f['lo']}~{f['hi']}"
+                    if "reserved" in nm.lower() or "预留" in nm:
+                        continue   # 保留位无语义不显示
+                    width = f["hi"] - f["lo"] + 1
+                    seg = (raw >> f["lo"]) & ((1 << width) - 1)
+                    text = f["enum_map"].get(seg)
+                    if text is None:
+                        text = str(seg)   # 段值未定义回退数值
+                    parts.append(f"{nm}: {text}")
+                if parts:
+                    return "；".join(parts)
+            # 枚举映射命中: 显示语义文本（调查表Data Content的“值：描述”），
+            # 如F200读到1 → "1 (剩余保养里程重置)"而非裸数值
+            raw = int(self.raw_value)
+            if raw in self.definition.enum_map:
+                return f"{raw} ({self.definition.enum_map[raw]})"
             val = self.physical_value
+            # .4g保留物理量分辨率（如110.9V、166.83；.3g会舍入到111/167）
             if self.definition.unit:
-                return f"{val:.3g} {self.definition.unit}"
-            return f"{val:.3g}"
+                return f"{val:.4g} {self.definition.unit}"
+            return f"{val:.4g}"
         elif self.definition.data_type == 'struct':
             return self.raw_data.hex()
         else:  # raw
+            # 智能显示: 全部字节为可打印ASCII（如ICCID数字串/BCD文本）
+            # 时以文本显示更符合语义，否则回退HEX
+            if self.raw_data and all(32 <= b < 127 for b in self.raw_data):
+                return self.ascii_value
             return self.raw_data.hex()
 
     @property
@@ -201,6 +265,10 @@ class DidManager:
     def add_definition(self, defn: DidDefinition):
         """添加DID定义"""
         self._definitions[defn.did_id] = defn
+
+    def clear_definitions(self):
+        """清空全部DID定义（切换调查表/ECU时替换语义用）"""
+        self._definitions.clear()
 
     def remove_definition(self, did_id: int):
         """移除DID定义"""

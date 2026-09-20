@@ -146,6 +146,7 @@ class FlashPanel(QWidget):
         bool_keys = {
             "enter_programming": "_session_check",
             "write_fingerprint": "_fp_check",
+            "erase_memory": "_erase_check",
             "prep_ext_session": "_prep_ext_check",
             "preprog_check": "_preprog_check",
             "dtc_off": "_dtc_off_check",
@@ -247,6 +248,13 @@ class FlashPanel(QWidget):
             "0x44即 地址(4字节)+大小(4字节)，请求为 31 01 FF00 44+地址+大小；\n"
             "设为0则不带格式字节（请求为 31 01 FF00+地址+大小）")
         param_form.addRow("擦除格式字节:", self._erase_fmt_edit)
+
+        self._erase_check = QCheckBox("擦除内存 (0x31 01 FF00)")
+        self._erase_check.setChecked(True)
+        self._erase_check.setToolTip(
+            "下载前擦除目标地址区域；关闭后跳过擦除"
+            "（部分ECU请求下载时自动擦除，或调试场景不希望破坏数据）")
+        param_form.addRow(self._erase_check)
 
         self._session_check = QCheckBox("进入编程会话 (0x10 02)")
         self._session_check.setChecked(True)
@@ -437,7 +445,8 @@ class FlashPanel(QWidget):
         rlayout.addWidget(post_group)
 
         # 参数变化时刷新步骤列表预览
-        for w in (self._session_check, self._fp_check, self._prep_ext_check,
+        for w in (self._session_check, self._fp_check, self._erase_check,
+                  self._prep_ext_check,
                   self._preprog_check, self._dtc_off_check, self._comm_disable_check,
                   self._integrity_check, self._depend_check, self._reset_check,
                   self._post_ext_check, self._post_comm_check, self._post_dtc_check,
@@ -472,6 +481,19 @@ class FlashPanel(QWidget):
         # 控件级QSS必须显式声明:disabled样式，否则禁用后仍显示原色、
         # 看起来可点实际点击无反应（覆盖全局QSS的禁用外观）
         btn_layout = QHBoxLayout()
+        self._repeat_spin = QSpinBox()
+        self._repeat_spin.setRange(1, 999)
+        self._repeat_spin.setValue(1)
+        self._repeat_spin.setSuffix(" 次")
+        self._repeat_spin.setFixedWidth(110)   # 防止Expanding策略拉伸占满整行
+        self._repeat_spin.setToolTip(
+            "连续刷写轮数（压测）: >1时自动重复完整刷写流程，"
+            "单轮失败记录后继续下一轮，结束后输出成功/失败汇总；"
+            "随时可点停止中断")
+        rep_label = QLabel("压测次数:")
+        btn_layout.addWidget(rep_label)
+        btn_layout.addWidget(self._repeat_spin)
+        btn_layout.addStretch(1)   # 压测输入靠左，按钮组靠右弹性填充
         self._start_btn = QPushButton("开始刷写")
         self._start_btn.setStyleSheet(
             "QPushButton { padding: 10px; font-weight: bold; background: #4CAF50; color: white; }"
@@ -552,6 +574,8 @@ class FlashPanel(QWidget):
             self._erase_bs_edit.text(), 0x40000)
         config.erase_format_byte = _parse_hex_addr(
             self._erase_fmt_edit.text(), 0x44) & 0xFF
+        config.erase_memory = self._erase_check.isChecked()
+        config.repeat_count = self._repeat_spin.value()
         # 已解析过当前文件时，擦除大小取文件地址跨度（执行时向上取整到擦除块大小）
         if self._parsed_path == config.file_path and self._parsed_span:
             config.erase_size = self._parsed_span
@@ -720,6 +744,9 @@ class FlashPanel(QWidget):
         self._start_btn.setEnabled(False)
         self._stop_btn.setEnabled(True)
         self._log(f"开始刷写 [{self._ecu_name}]: {config.file_path}")
+        if config.repeat_count > 1:
+            self._log(f"压测模式: 连续{config.repeat_count}轮，"
+                      f"单轮失败继续，结束后输出汇总")
 
         self._flash_manager.start_flash(config)
 
@@ -763,12 +790,18 @@ class FlashPanel(QWidget):
             FlashState.FAILED: "刷写失败",
             FlashState.CANCELLED: "已取消",
         }
-        # 状态栏优先显示具体步骤名
+        # 状态栏优先显示具体步骤名（压测模式附加轮次，
+        # 轮次由刷写线程写入，int读取线程安全）
+        prog = getattr(self._flash_manager, "_progress", None)
+        rep = getattr(prog, "repeat_total", 1) if prog else 1
+        cur = getattr(prog, "repeat_current", 1) if prog else 1
+        round_txt = f"[第{cur}/{rep}轮] " if rep > 1 else ""
         if key and key in STEP_REGISTRY:
-            self._status_label.setText(f"状态: {STEP_REGISTRY[key][0]}...")
+            self._status_label.setText(
+                f"状态: {round_txt}{STEP_REGISTRY[key][0]}...")
         else:
             self._status_label.setText(
-                f"状态: {state_names.get(state, '未知')}")
+                f"状态: {round_txt}{state_names.get(state, '未知')}")
 
         last = len(self._step_items) - 1
         # 终态优先：完成时全部标记成功（含结果步），避免key分支把结果步停在"进行中"

@@ -77,6 +77,20 @@ class TraceView(QWidget):
             desc = f"{desc} | {dbc_desc}" if desc else dbc_desc
         self._can_trace.add_message(direction, can_id, data, desc)
 
+    def set_doip_context(self, tester_addr: int, ecu_addr: int):
+        """进入DoIP会话: 转发逻辑地址上下文，并把"CAN Trace"页签
+        改为"DoIP Trace"（DoIP下传输层为DoIP诊断消息，无CAN帧）"""
+        self._can_trace.set_doip_context(tester_addr, ecu_addr)
+        # UDS Trace为会话层视图: 数据列保持纯UDS（不带DoIP传输层头）
+        self._uds_trace.set_doip_context(tester_addr, ecu_addr, frame_view=False)
+        self._tabs.setTabText(self.TAB_CAN, "DoIP Trace")
+
+    def clear_doip_context(self):
+        """退出DoIP会话: 清除上下文，页签恢复CAN语义"""
+        self._can_trace.clear_doip_context()
+        self._uds_trace.clear_doip_context()
+        self._tabs.setTabText(self.TAB_CAN, "CAN Trace")
+
     def show_trace(self, uds: bool = False):
         """外部入口: 切换到CAN/UDS Trace页签"""
         self._tabs.setCurrentIndex(self.TAB_UDS if uds else self.TAB_CAN)

@@ -9,6 +9,7 @@
 """
 
 import os
+import re
 import subprocess
 import sys
 from PyQt6.QtWidgets import (
@@ -198,6 +199,9 @@ class MainWindow(QMainWindow):
             self._diag_view.session_panel.pause_keepalive)
         self._test_view.tests_finished.connect(
             self._diag_view.session_panel.resume_keepalive)
+        # DID定义库变更（手动添加/编辑）→ 同步数据流/IO控制面板的下拉
+        self._diag_view.did_panel.definitions_changed.connect(
+            self._sync_datastream_definitions)
         # 日志面板最小高度由LogDock自管（展开170防挤压/折叠收缩到头部一行）
         self._v_splitter.addWidget(self._log_dock)
         self._v_splitter.setStretchFactor(0, 1)
@@ -447,8 +451,16 @@ class MainWindow(QMainWindow):
         """
         self._current_ecu = defn
         self._connection_panel.set_uds_ids(defn.tx_id, defn.rx_id)
+        # 功能寻址ID同步到连接面板（与诊断地址同模式: 显示当前生效值，
+        # 用户可在连接面板临时覆盖——连接时按面板值生效）
+        self._connection_panel.set_functional_id(defn.functional_tx_id)
         self._diag_view.set_ecu(defn)
         self._flash_panel.set_ecu_name(defn.name, defn.functional_tx_id)
+        # 会话保持功能寻址默认跟随ECU定义（仅DoCAN；DoIP固定标准功能组）
+        self._diag_view.session_panel.set_functional_id_hint(
+            defn.functional_tx_id)
+        # 该ECU关联了调查表 → 自动加载其定义库（替换旧ECU的定义）
+        self._auto_load_ecu_survey(defn)
         ecu_text = f"ECU: {defn.name}"
         if self._uds_client is None:
             ecu_text += " | Offline"
@@ -507,8 +519,11 @@ class MainWindow(QMainWindow):
                 self._ecu_defs[0])
         self._current_ecu = target
         self._connection_panel.set_uds_ids(target.tx_id, target.rx_id)
+        self._connection_panel.set_functional_id(target.functional_tx_id)
         self._diag_view.set_ecu(target)
         self._flash_panel.set_ecu_name(target.name, target.functional_tx_id)
+        self._diag_view.session_panel.set_functional_id_hint(
+            target.functional_tx_id)
         self._lbl_ecu.setText(f"ECU: {target.name} | Offline")
         self._refresh_ecu_icons()
 
@@ -650,6 +665,16 @@ class MainWindow(QMainWindow):
         self._btn_scan.setToolTip("对已定义地址逐个探测在线ECU (F7)")
         self._btn_scan.triggered.connect(self._on_scan)
         toolbar.addAction(self._btn_scan)
+
+        toolbar.addSeparator()
+
+        # 定义库: 全模块定义导入的统一显眼入口（调查表/JSON/ODX → 各面板）
+        self._btn_deflib = QAction("📖 定义库", self)
+        self._btn_deflib.setToolTip(
+            "诊断定义库: 统一导入调查表/JSON/ODX定义，\n"
+            "自动分发到DID/DTC/数据流面板并持久化")
+        self._btn_deflib.triggered.connect(self._open_definition_center)
+        toolbar.addAction(self._btn_deflib)
 
         toolbar.addSeparator()
 
@@ -823,10 +848,11 @@ class MainWindow(QMainWindow):
                 bitrate = 0
                 addr_tx = can_iface.ecu_address
                 addr_rx = can_iface.tester_address
-                # DoIP会话上下文: pcap导出时重建以太网帧用
-                self._log_dock.can_trace.set_doip_context(
+                # DoIP会话上下文: pcap导出时重建以太网帧用;
+                # Trace页签同步改为DoIP语义（无CAN帧）
+                self._log_dock.set_doip_context(
                     can_iface.tester_address, can_iface.ecu_address)
-                self._trace_view.can_trace.set_doip_context(
+                self._trace_view.set_doip_context(
                     can_iface.tester_address, can_iface.ecu_address)
             else:
                 self._uds_client = UdsClient(can_iface, tx_id=tx_id, rx_id=rx_id)
@@ -855,6 +881,11 @@ class MainWindow(QMainWindow):
                         f"0x{self._current_ecu.rx_id:03X})不一致", "WARNING")
 
             # 注入UDS客户端到所有工作区
+            # 会话保持功能寻址ID跟随连接面板配置（按硬件类型适配:
+            # CAN→功能CAN ID，DoIP→功能组逻辑地址；用户可在连接
+            # 面板临时覆盖ECU定义值）
+            self._diag_view.session_panel.set_functional_id_hint(
+                self._connection_panel.functional_id)
             self._diag_view.set_uds_client(self._uds_client)
             self._flash_panel.set_uds_client(self._uds_client)
             self._cal_view.set_uds_client(self._uds_client)
@@ -913,8 +944,8 @@ class MainWindow(QMainWindow):
             self._trace_view.set_can_interface(None)
             self._diag_view.set_online(False)
             self._ecu_online.clear()
-            self._log_dock.can_trace.clear_doip_context()
-            self._trace_view.can_trace.clear_doip_context()
+            self._log_dock.clear_doip_context()
+            self._trace_view.clear_doip_context()
 
             self._set_dot(self._lbl_can, "CAN", False)
             self._set_dot(self._lbl_uds, "UDS", False)
@@ -1052,10 +1083,12 @@ class MainWindow(QMainWindow):
         uds_msg = None
         uds_desc = ""
         if self._connection_panel.is_doip:
-            # DoIP诊断消息携带裸UDS数据（无ISO-TP头），即完整报文
+            # DoIP诊断消息携带裸UDS数据（无ISO-TP头），即完整报文。
+            # 描述标注DoIP帧类型（0x8001诊断消息）——明确这是DoIP报文
+            # 而非CAN帧（DoIP会话中不存在CAN报文）
             uds_msg = msg.data
             uds_desc = self._describe_uds(msg.data)
-            desc = uds_desc
+            desc = f"DoIP 0x8001 | {uds_desc}" if uds_desc else "DoIP 0x8001"
         else:
             desc = self._describe_frame(msg.data)
             # 诊断地址帧才进重组器: RX=本ECU响应地址，TX=请求/功能地址
@@ -1314,6 +1347,65 @@ class MainWindow(QMainWindow):
             return
         self._load_project_file(filepath)
 
+    def _open_definition_center(self):
+        """定义库: 统一导入入口（调查表/JSON/ODX → 各模块共享）"""
+        from src.ui.dialogs.definition_center import DefinitionCenterDialog
+        dlg = DefinitionCenterDialog(self)
+        dlg.exec()
+
+    def _sync_datastream_definitions(self):
+        """DID面板定义同步到数据流/IO控制面板（统一导入的共享分发）
+
+        IO面板优先显示调查表4_2的I/O DID List（仅实际IO控制DID），
+        无4_2数据时回退全部DID定义。
+        """
+        definitions = self._diag_view.did_panel._did_manager.definitions
+        self._diag_view.datastream_panel.sync_definitions(definitions)
+        self._diag_view.io_panel.sync_did_definitions(
+            definitions, getattr(self, "_survey_io_dids", None))
+
+    def _auto_load_ecu_survey(self, defn: "EcuDefinition"):
+        """ECU关联调查表时自动加载（切换ECU = 切换定义库）
+
+        与当前已加载源相同则跳过（避免重复解析大xlsx）
+        """
+        survey = getattr(defn, "survey", "")
+        if not survey or not os.path.isfile(survey):
+            return
+        if self._config.get("imports.did_dtc") == survey:
+            return   # 已是该调查表（启动恢复已加载）
+        self._apply_did_dtc_import(survey, persist=True, replace=True)
+        self._log_dock.log_business(
+            f"已自动加载 ECU {defn.name} 的调查表: "
+            f"{os.path.basename(survey)}", "SUCCESS")
+
+    def _associate_survey_to_ecu(self, filepath: str) -> bool:
+        """把调查表路径写入当前ECU的ecu.json（survey字段）
+
+        之后切换到该ECU时自动加载此表。ecu.json内不允许注释，
+        重写时保留其余字段
+        """
+        import json
+        defn = self._current_ecu
+        if not defn or not getattr(defn, "def_dir", ""):
+            self._log_dock.log_business("无法关联: 当前ECU无定义目录", "ERROR")
+            return False
+        ecu_json = os.path.join(defn.def_dir, "ecu.json")
+        try:
+            with open(ecu_json, "r", encoding="utf-8") as f:
+                data = json.load(f)
+            data["survey"] = filepath
+            with open(ecu_json, "w", encoding="utf-8") as f:
+                json.dump(data, f, ensure_ascii=False, indent=2)
+            defn.survey = filepath   # 内存同步，本轮即生效
+            self._log_dock.log_business(
+                f"调查表已关联到 ECU {defn.name}: {os.path.basename(filepath)}",
+                "SUCCESS")
+            return True
+        except Exception as e:
+            self._log_dock.log_business(f"关联失败: {e}", "ERROR")
+            return False
+
     def _on_import_ecu_def(self):
         """导入ECU Definition: 打开定义目录（新增ECU只需放置文件夹+ecu.json）"""
         ecu_dir = os.path.join(self._project_root(), "resources", "ecu")
@@ -1333,17 +1425,31 @@ class MainWindow(QMainWindow):
             "调查表Excel (*.xlsx *.xlsm)")
         if not filepath:
             return
-        self._apply_did_dtc_import(filepath, persist=True)
+        # 手动导入=切换数据库（替换旧定义，避免跨ECU残留）
+        self._apply_did_dtc_import(filepath, persist=True, replace=True)
 
-    def _apply_did_dtc_import(self, filepath: str, persist: bool = False):
+    def _apply_did_dtc_import(self, filepath: str, persist: bool = False,
+                               replace: bool = False):
         """解析文件内容并注入DID面板和/或DTC面板
-
+    
         支持: JSON（dids/dtcs键或列表）、OEM调查表xlsx
         （自动解析服务矩阵/DID/DTC sheet; dids与dtcs同时存在时两者均导入）
+        replace=True时替换旧定义（切换调查表=切换数据库，避免跨ECU残留）。
+        替换清空延迟到解析确认有效之后——导入失败/空文件时保留旧库，
+        避免一次失败的导入把全局定义库清空导致各面板下拉全空。
         """
         import json
         import tempfile
-
+    
+        def _do_replace():
+            """替换语义清空: DID/DTC/例程/数据流共享定义全部重置"""
+            self._diag_view.did_panel._did_manager.clear_definitions()
+            self._diag_view.dtc_panel._dtc_manager.clear_definitions()
+            self._diag_view.routine_panel.sync_routine_definitions([])
+            self._diag_view.datastream_panel._did_manager.clear_definitions()
+            self._diag_view.uds_service_view.sync_service_definitions([])
+            self._survey_io_dids = []   # I/O DID List随调查表切换重置
+    
         ext = os.path.splitext(filepath)[1].lower()
         if ext in (".xlsx", ".xlsm"):
             # OEM调查表Excel → 解析为调查表JSON → 递归走统一导入逻辑
@@ -1357,14 +1463,17 @@ class MainWindow(QMainWindow):
                 QMessageBox.warning(
                     self, "导入配置", "调查表内未解析到DID/DTC定义")
                 return
+            if replace:
+                _do_replace()   # 确认有效后才替换（失败时上方已return，旧库保留）
             with tempfile.NamedTemporaryFile(
                     "w", suffix=".json", delete=False,
                     encoding="utf-8") as tmp:
                 json.dump(data, tmp, ensure_ascii=False)
                 tmp_path = tmp.name
             try:
-                # persist在递归内关闭，由外层记录原始xlsx路径
-                self._apply_did_dtc_import(tmp_path)
+                # persist在递归内关闭，由外层记录原始xlsx路径；
+                # 替换清空已由外层完成，递归不再重复清
+                self._apply_did_dtc_import(tmp_path, replace=False)
             finally:
                 os.remove(tmp_path)
             if persist:
@@ -1378,13 +1487,23 @@ class MainWindow(QMainWindow):
             QMessageBox.warning(self, "导入配置", f"文件解析失败: {e}")
             return
 
-        # 内容识别: dids→DID定义, dtcs→DTC定义（两者同时存在时均导入）
+        # 内容探测（先识别再替换）: dids→DID定义, dtcs→DTC定义
+        has_dids = isinstance(data, dict) and data.get("dids")
+        has_dtcs = isinstance(data, dict) and data.get("dtcs")
+        is_list = isinstance(data, list) and data \
+            and isinstance(data[0], dict)
+        if not (has_dids or has_dtcs or is_list):
+            QMessageBox.warning(
+                self, "导入配置", "未识别的配置格式（需含 dids 或 dtcs 键）")
+            return
+        if replace:
+            _do_replace()   # 确认有效后才替换（未识别时上方已return，旧库保留）
+
+        # 内容导入: dids→DID定义, dtcs→DTC定义（两者同时存在时均导入）
         did_count = dtc_count = 0
-        imported = False
-        if isinstance(data, dict) and "dids" in data:
+        if has_dids:
             did_count = self._diag_view.did_panel.import_definitions(filepath)
-            imported = True
-        if isinstance(data, dict) and "dtcs" in data:
+        if has_dtcs:
             # DTC定义管理器只认列表格式，归一化到临时文件加载
             with tempfile.NamedTemporaryFile(
                     "w", suffix=".json", delete=False,
@@ -1396,34 +1515,83 @@ class MainWindow(QMainWindow):
                     tmp_path)
             finally:
                 os.remove(tmp_path)
-            imported = True
-        elif isinstance(data, list) and data and isinstance(data[0], dict):
+        elif is_list:
             if "dtc_id" in data[0]:
                 dtc_count = self._diag_view.dtc_panel.import_definitions(
                     filepath)
-                imported = True
             else:
                 did_count = self._diag_view.did_panel.import_definitions(
                     filepath)
-                imported = True
 
-        if not imported:
-            QMessageBox.warning(
-                self, "导入配置", "未识别的配置格式（需含 dids 或 dtcs 键）")
-            return
+        # 例程定义: 调查表services中的0x31条目 → 例程面板下拉
+        # （xlsx导入时经临时JSON递归，services同样在此处的data中）
+        routine_count = 0
+        routines = self._extract_survey_routines(data)
+        if routines:
+            self._diag_view.routine_panel.sync_routine_definitions(routines)
+            routine_count = len(routines)
+
+        # 诊断控制台: 调查表services全量条目 → 服务库一键发送列表
+        # （与专用功能页分工: 控制台发原始请求，专用页做引导式解码操作）
+        services = data.get("services") if isinstance(data, dict) else []
+        services = services or []
+        self._diag_view.uds_service_view.sync_service_definitions(services)
+
+        # I/O DID List: 调查表4_2表条目 → IO控制面板下拉（仅实际IO控制DID）
+        io_did_list = data.get("io_dids") if isinstance(data, dict) else None
+        self._survey_io_dids = list(io_did_list) if io_did_list else []
 
         parts = []
         if did_count:
             parts.append(f"DID定义 {did_count} 项")
+            self._sync_datastream_definitions()   # 数据流面板共享定义
         if dtc_count:
             parts.append(f"DTC定义 {dtc_count} 项")
+        if routine_count:
+            parts.append(f"例程定义 {routine_count} 项")
+        if services:
+            parts.append(f"服务条目 {len(services)} 条")
+        if self._survey_io_dids:
+            parts.append(f"I/O DID {len(self._survey_io_dids)} 项")
         msg = "导入" + "、".join(parts) if parts else "导入内容为空"
         self._log_dock.log_business(
             f"{msg}: {os.path.basename(filepath)}",
             "SUCCESS" if (did_count or dtc_count) else "ERROR")
-        self._statusbar.showMessage(msg, 3000)
+        # 启动恢复链路在_init_statusbar之前执行，状态栏可能尚未创建
+        sb = getattr(self, "_statusbar", None)
+        if sb is not None:
+            sb.showMessage(msg, 3000)
         if persist and (did_count or dtc_count):
             self._config.set("imports.did_dtc", filepath)
+
+    @staticmethod
+    def _extract_survey_routines(data) -> list:
+        """从调查表JSON的services中提取例程定义 [(routine_id, 描述)]
+
+        例程sheet解析为services条目（request="31 01 5200"、
+        description="例程控制 0x5200 前轮胎压传感器匹配 ..."）；
+        按例程ID去重，描述去掉"例程控制 0xXXXX "前缀
+        """
+        routines = []
+        seen = set()
+        services = data.get("services") if isinstance(data, dict) else None
+        for svc in services or []:
+            req = str(svc.get("request", "")).strip().replace(" ", "")
+            # 请求格式: 31 <控制类型> <RID高> <RID低>（如 31 01 52 00）
+            if not req.startswith("31") or len(req) < 8:
+                continue
+            try:
+                rid = (int(req[4:6], 16) << 8) | int(req[6:8], 16)
+            except ValueError:
+                continue
+            if rid in seen:
+                continue
+            seen.add(rid)
+            desc = str(svc.get("description") or svc.get("name") or "")
+            # 去掉"例程控制 0xXXXX "前缀，仅保留例程含义
+            desc = re.sub(r"^例程控制\s*0x[0-9A-Fa-f]+\s*", "", desc).strip()
+            routines.append((rid, desc or f"Routine_{rid:04X}"))
+        return routines
 
     def _on_import_flash_config(self):
         """导入Flash配置: 应用到刷写中心参数"""
@@ -1480,6 +1648,7 @@ class MainWindow(QMainWindow):
         did_dtc = self._config.get("imports.did_dtc")
         if did_dtc and os.path.isfile(did_dtc):
             self._apply_did_dtc_import(did_dtc)
+            self._sync_datastream_definitions()   # 数据流面板共享定义
         odx_dtcs = self._config.get("imports.odx_dtcs")
         if odx_dtcs and os.path.isfile(odx_dtcs):
             self._diag_view.dtc_panel.import_definitions(odx_dtcs)

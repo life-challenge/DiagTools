@@ -145,6 +145,21 @@ class LogDock(QWidget):
         if uds_msg is not None:
             self._uds_trace.add_message(direction, can_id, uds_msg, uds_desc)
 
+    def set_doip_context(self, tester_addr: int, ecu_addr: int):
+        """进入DoIP会话: 转发逻辑地址上下文（pcap导出用），
+        并把"CAN Trace"页签改为"DoIP Trace"——DoIP下传输层报文
+        为DoIP诊断消息（逻辑地址+裸UDS），不存在CAN帧"""
+        self._can_trace.set_doip_context(tester_addr, ecu_addr)
+        # UDS Trace为会话层视图: 数据列保持纯UDS（不带DoIP传输层头）
+        self._uds_trace.set_doip_context(tester_addr, ecu_addr, frame_view=False)
+        self._tabs.setTabText(self.TAB_CAN, "DoIP Trace")
+
+    def clear_doip_context(self):
+        """退出DoIP会话: 清除逻辑地址上下文，页签恢复CAN语义"""
+        self._can_trace.clear_doip_context()
+        self._uds_trace.clear_doip_context()
+        self._tabs.setTabText(self.TAB_CAN, "CAN Trace")
+
     def log_business(self, msg: str, level: str = "INFO"):
         """追加业务日志条目（§7: 时间 + 等级 + 内容，按等级着色）"""
         ts = time.strftime("%H:%M:%S")

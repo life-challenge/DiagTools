@@ -3,12 +3,102 @@
 import os
 from PyQt6.QtWidgets import (QWidget, QVBoxLayout, QHBoxLayout, QGroupBox,
                               QLabel, QPushButton, QTableWidget, QTableWidgetItem,
-                              QHeaderView, QLineEdit, QFileDialog, QCheckBox, QSpinBox, QGridLayout)
+                              QHeaderView, QLineEdit, QFileDialog, QCheckBox, QSpinBox,
+                              QGridLayout, QAbstractItemView, QComboBox,
+                              QDialog, QFormLayout, QMessageBox)
 from PyQt6.QtCore import Qt, QTimer, QThread, pyqtSignal
 from PyQt6.QtGui import QColor, QFont
 from src.business.did_manager import DidManager, DidDefinition
 from src.ui.async_uds import UdsWorker
-from src.utils.paths import get_resource_path
+from src.ui.widgets.click_combo import make_combo_popup_on_click
+
+
+_DID_TYPES = ["raw", "ascii", "uint", "int", "float"]
+
+
+class _DidEditDialog(QDialog):
+    """手动添加DID定义（无需加载调查表，逐条录入）"""
+
+    def __init__(self, parent=None, defn: "DidDefinition | None" = None):
+        super().__init__(parent)
+        self.setWindowTitle("编辑DID定义" if defn else "添加DID定义")
+        self.setMinimumWidth(320)
+        self.defn = defn
+
+        form = QFormLayout(self)
+        mono = QFont("Consolas", 10)
+
+        self._id_edit = QLineEdit()
+        self._id_edit.setPlaceholderText("如 F190")
+        self._id_edit.setFont(mono)
+        if defn:
+            self._id_edit.setText(f"{defn.did_id:04X}")
+            self._id_edit.setEnabled(False)   # 编辑时不允许改DID号
+        form.addRow("DID号(hex):", self._id_edit)
+
+        self._name_edit = QLineEdit()
+        self._name_edit.setPlaceholderText("如 VINDataIdentifier")
+        if defn:
+            self._name_edit.setText(defn.name)
+        form.addRow("名称:", self._name_edit)
+
+        self._type_combo = QComboBox()
+        self._type_combo.addItems(_DID_TYPES)
+        if defn and defn.data_type in _DID_TYPES:
+            self._type_combo.setCurrentText(defn.data_type)
+        self._type_combo.setToolTip(
+            "raw:原始字节(HEX显示) / ascii:文本 / uint·int:整数\n"
+            "float:浮点 —— 超过4字节的整数自动按HEX分组显示")
+        form.addRow("数据类型:", self._type_combo)
+
+        self._len_spin = QSpinBox()
+        self._len_spin.setRange(1, 4096)
+        self._len_spin.setValue(defn.length if defn else 4)
+        form.addRow("长度(字节):", self._len_spin)
+
+        self._unit_edit = QLineEdit()
+        self._unit_edit.setPlaceholderText("可选，如 V / km/h")
+        if defn:
+            self._unit_edit.setText(defn.unit or "")
+        form.addRow("单位:", self._unit_edit)
+
+        self._desc_edit = QLineEdit()
+        self._desc_edit.setPlaceholderText("可选描述")
+        if defn:
+            self._desc_edit.setText(defn.description or "")
+        form.addRow("描述:", self._desc_edit)
+
+        btns = QHBoxLayout()
+        btns.addStretch()
+        cancel = QPushButton("取消")
+        cancel.clicked.connect(self.reject)
+        ok = QPushButton("确定")
+        ok.setObjectName("btn_primary")
+        ok.clicked.connect(self._on_ok)
+        btns.addWidget(cancel)
+        btns.addWidget(ok)
+        form.addRow(btns)
+
+    def _on_ok(self):
+        text = self._id_edit.text().strip().replace("0x", "")
+        try:
+            did_id = int(text, 16)
+            if not 0 <= did_id <= 0xFFFF:
+                raise ValueError
+        except ValueError:
+            QMessageBox.warning(self, "添加DID", "DID号必须是1~4位十六进制")
+            return
+        if not self._name_edit.text().strip():
+            QMessageBox.warning(self, "添加DID", "请填写名称")
+            return
+        self.result_defn = DidDefinition(
+            did_id=did_id,
+            name=self._name_edit.text().strip(),
+            description=self._desc_edit.text().strip(),
+            data_type=self._type_combo.currentText(),
+            length=self._len_spin.value(),
+            unit=self._unit_edit.text().strip())
+        self.accept()
 
 
 class DidPanel(QWidget):
@@ -16,6 +106,8 @@ class DidPanel(QWidget):
 
     # 业务日志转发(msg, level): 面板不再内置日志窗口，统一由主窗口业务日志呈现
     business_log = pyqtSignal(str, str)
+    # 定义库变更(手动添加/编辑/导入后发射)，主窗口据此同步数据流/IO面板
+    definitions_changed = pyqtSignal()
 
     def __init__(self, uds_client=None, parent=None):
         super().__init__(parent)
@@ -35,11 +127,15 @@ class DidPanel(QWidget):
     def _init_ui(self):
         layout = QVBoxLayout(self)
 
-        # 工具栏
+        # 工具栏（定义导入统一由主窗口工具栏"定义库"入口提供）
         toolbar = QHBoxLayout()
-        self._load_def_btn = QPushButton("加载定义")
-        self._load_def_btn.clicked.connect(self._load_definitions)
-        toolbar.addWidget(self._load_def_btn)
+
+        self._add_btn = QPushButton("＋ 添加DID")
+        self._add_btn.setToolTip(
+            "手动添加DID定义到列表（无需加载调查表）；\n"
+            "表格中双击行可编辑已有定义")
+        self._add_btn.clicked.connect(self._add_definition)
+        toolbar.addWidget(self._add_btn)
 
         self._read_btn = QPushButton("读取选中")
         self._read_btn.clicked.connect(self._read_selected)
@@ -82,13 +178,24 @@ class DidPanel(QWidget):
         self._table.setColumnCount(7)
         self._table.setHorizontalHeaderLabels(
             ["DID", "名称", "类型", "当前值", "原始数据", "单位", "状态"])
+        # 双击行编辑该DID定义（配合"＋ 添加DID"的手动录入能力）
+        self._table.cellDoubleClicked.connect(self._on_table_double_clicked)
         header = self._table.horizontalHeader()
         # 名称列独占弹性空间；数据列随内容自适应，保证“当前值/原始数据”
         # 不被长名称挤压显示不全
         header.setSectionResizeMode(1, QHeaderView.ResizeMode.Stretch)
-        for col in (0, 2, 3, 4, 5):
+        for col in (0, 2, 5, 6):
             header.setSectionResizeMode(
                 col, QHeaderView.ResizeMode.ResizeToContents)
+        # 当前值/原始数据固定宽度+省略+tooltip: 总宽不超面板，
+        # 消除横向滚动需求
+        header.setSectionResizeMode(3, QHeaderView.ResizeMode.Interactive)
+        header.setSectionResizeMode(4, QHeaderView.ResizeMode.Interactive)
+        self._table.setColumnWidth(3, 280)
+        self._table.setColumnWidth(4, 200)
+        # 横向滚动像素级平滑（内容仍超宽时可平滑拖动，无需Shift+滚轮）
+        self._table.setHorizontalScrollMode(
+            QAbstractItemView.ScrollMode.ScrollPerPixel)
         # 超长名称以省略号截断（完整内容见tooltip）
         self._table.setTextElideMode(Qt.TextElideMode.ElideRight)
         self._table.setWordWrap(False)
@@ -102,9 +209,18 @@ class DidPanel(QWidget):
         mono = QFont("Consolas", 10)
 
         manual_layout.addWidget(QLabel("DID:"), 0, 0)
-        self._manual_did = QLineEdit()
-        self._manual_did.setPlaceholderText("如 F190")
-        self._manual_did.setMaximumWidth(100)
+        self._manual_did = QComboBox()
+        self._manual_did.setEditable(True)
+        self._manual_did.setInsertPolicy(QComboBox.InsertPolicy.NoInsert)
+        self._manual_did.setFixedWidth(220)
+        self._manual_did.setFont(mono)
+        self._manual_did.lineEdit().setPlaceholderText("如 F190")
+        self._manual_did.setToolTip(
+            "已加载DID定义后可直接下拉选择；也可手动输入4位hex")
+        self._manual_did.currentIndexChanged.connect(self._on_did_combo_pick)
+        # 点击输入框即弹出候选（不依赖右侧箭头命中）；旁边定义表格
+        # 选中后点"读取选中"是更常用的选择路径，不再另加选择窗口按钮
+        make_combo_popup_on_click(self._manual_did)
         manual_layout.addWidget(self._manual_did, 0, 1)
 
         read_btn = QPushButton("读取")
@@ -143,15 +259,70 @@ class DidPanel(QWidget):
         layout.addWidget(manual_group)
 
         layout.addStretch()
+        self._refresh_did_combo()   # 初始化/项目恢复后的定义下拉
 
-    def _load_definitions(self):
-        start_dir = get_resource_path("did_definitions")
-        filepath, _ = QFileDialog.getOpenFileName(
-            self, "加载DID定义", start_dir,
-            "DID定义/调查表 (*.json *.xlsx *.xlsm);;JSON Files (*.json);;"
-            "调查表Excel (*.xlsx *.xlsm)")
-        if filepath:
-            self.import_definitions(filepath)
+    def _refresh_did_combo(self):
+        """已加载的DID定义填充手动输入下拉（加载定义后自动刷新）"""
+        combo = self._manual_did
+        combo.blockSignals(True)
+        combo.clear()
+        combo.addItem("手动输入DID...", "")
+        for did_id, defn in sorted(self._did_manager.definitions.items()):
+            combo.addItem(f"0x{did_id:04X} - {defn.name}", f"{did_id:04X}")
+        combo.lineEdit().clear()
+        combo.blockSignals(False)
+
+    def _on_did_combo_pick(self):
+        """下拉选择定义后仅保留DID号到输入框（名称丢弃，可直接读取/写入）
+
+        选中提示项（首项）则清空编辑框并聚焦待手动输入：editable combo
+        点选item时Qt会把item文本填入lineEdit，“手动输入DID...”的提示
+        文字会残留并与后续输入拼接，需主动清掉。
+        """
+        if self._manual_did.currentIndex() == 0:
+            edit = self._manual_did.lineEdit()
+            edit.clear()
+            edit.setFocus()
+            return
+        data = self._manual_did.currentData()
+        if data:
+            self._manual_did.lineEdit().setText(data)
+
+    def _on_table_double_clicked(self, row: int, _col: int):
+        """双击行 → 编辑对应DID定义"""
+        item = self._table.item(row, 0)
+        if not item:
+            return
+        text = item.text().replace("0x", "").strip()
+        try:
+            self._edit_definition(int(text, 16))
+        except ValueError:
+            pass
+
+    def _add_definition(self):
+        """手动添加DID定义（对话框录入 → 列表/下拉即时生效）"""
+        dlg = _DidEditDialog(self)
+        if dlg.exec() and getattr(dlg, "result_defn", None):
+            self._did_manager.add_definition(dlg.result_defn)
+            self._refresh_table()
+            self._refresh_did_combo()
+            self.definitions_changed.emit()
+            self._log(f"已添加DID定义 0x{dlg.result_defn.did_id:04X} "
+                      f"- {dlg.result_defn.name}", "SUCCESS")
+
+    def _edit_definition(self, did_id: int):
+        """双击行编辑已有DID定义"""
+        defn = self._did_manager.get_definition(did_id)
+        if not defn:
+            return
+        dlg = _DidEditDialog(self, defn)
+        if dlg.exec() and getattr(dlg, "result_defn", None):
+            self._did_manager.add_definition(dlg.result_defn)
+            self._refresh_table()
+            self._refresh_did_combo()
+            self.definitions_changed.emit()
+            self._log(f"已更新DID定义 0x{did_id:04X} "
+                      f"- {dlg.result_defn.name}", "SUCCESS")
 
     def import_definitions(self, filepath: str) -> int:
         """程序化导入DID定义（菜单/项目加载入口），返回导入数量
@@ -176,6 +347,7 @@ class DidPanel(QWidget):
                     pass  # 无效条目跳过（from_dict已校验did_id）
             if count > 0:
                 self._refresh_table()
+                self._refresh_did_combo()   # 手动读取下拉同步新定义
                 self._log(f"从调查表加载了 {count} 个DID定义: "
                           f"{_os.path.basename(filepath)}")
             else:
@@ -185,6 +357,7 @@ class DidPanel(QWidget):
         count = self._did_manager.load_definitions_from_json(filepath)
         if count > 0:
             self._refresh_table()
+            self._refresh_did_combo()   # 手动读取下拉同步新定义
             self._log(f"加载了 {count} 个DID定义: {os.path.basename(filepath)}")
         else:
             self._log(f"DID定义导入失败或为空: {filepath}")
@@ -203,12 +376,18 @@ class DidPanel(QWidget):
 
             val = self._did_manager.get_value(did_id)
             if val:
-                self._table.setItem(row, 3, QTableWidgetItem(val.display_value))
-                self._table.setItem(row, 4, QTableWidgetItem(val.raw_data.hex(" ")))
+                val_item = QTableWidgetItem(val.display_value)
+                # 超宽内容省略显示，完整值看tooltip（配合固定列宽消除横向滚动）
+                val_item.setToolTip(
+                    f"{val.display_value}\n原始: {val.raw_data.hex(' ').upper()}")
+                self._table.setItem(row, 3, val_item)
+                raw_item = QTableWidgetItem(val.raw_data.hex(" ").upper())
+                raw_item.setToolTip(raw_item.text())
+                self._table.setItem(row, 4, raw_item)
                 # 值域颜色
                 if val.is_in_range is not None:
                     color = QColor("#4CAF50") if val.is_in_range else QColor("#F44336")
-                    self._table.item(row, 3).setForeground(color)
+                    val_item.setForeground(color)
             else:
                 self._table.setItem(row, 3, QTableWidgetItem("--"))
                 self._table.setItem(row, 4, QTableWidgetItem("--"))
@@ -291,8 +470,14 @@ class DidPanel(QWidget):
                 self._log(f"读取 0x{did_id:04X}: {val.display_value}",
                           "SUCCESS")
                 if arg:
-                    self._show_detail(did_id, resp, resp,
-                                       self._decode_payload(raw_data))
+                    # 手动操作区Decoded按调查表定义解码（公式/单位/数据类型，
+                    # 如CF00: uint + phy=XX*0.01+3 → 物理值）；
+                    # 无定义时才回退ASCII/HEX智能显示
+                    if val.definition is not None:
+                        decoded = val.display_value
+                    else:
+                        decoded = self._decode_payload(raw_data)
+                    self._show_detail(did_id, resp, resp, decoded)
                 self._refresh_table()
             else:
                 detail = self._describe_bad_resp(resp)
@@ -361,24 +546,39 @@ class DidPanel(QWidget):
         except ValueError:
             self._log("HEX数据格式错误")
 
-    def _manual_read(self):
-        did_text = self._manual_did.text().strip()
-        if not did_text:
-            return
+    def _manual_did_value(self) -> int:
+        """手动区DID输入解析；非法输入返回 -1
+
+        提示项残留容错: 若“手动输入DID...”提示文字与输入混在一起
+        （如“手动输入DID...F190”），取“...”之后的尾部解析。
+        """
+        text = self._manual_did.currentText().strip().replace(" ", "")
+        if "..." in text:
+            text = text.split("...")[-1].strip()
+        if not text:
+            return -1
         try:
-            did_id = int(did_text.replace("0x", ""), 16)
-            self._do_read_did(did_id, show_detail=True)
+            return int(text.replace("0x", ""), 16)
         except ValueError:
-            self._log("DID格式错误")
+            return -1
+
+    def _manual_read(self):
+        did_id = self._manual_did_value()
+        if did_id < 0:
+            self._log("DID格式错误（应为1~4位十六进制）")
+            return
+        self._do_read_did(did_id, show_detail=True)
 
     def _manual_write(self):
-        did_text = self._manual_did.text().strip()
+        did_id = self._manual_did_value()
         data_hex = self._manual_data.text().strip()
-        if not did_text or not data_hex:
-            self._log("请输入DID和写入数据")
+        if did_id < 0:
+            self._log("DID格式错误（应为1~4位十六进制）")
+            return
+        if not data_hex:
+            self._log("请输入写入数据")
             return
         try:
-            did_id = int(did_text.replace("0x", ""), 16)
             data = bytes.fromhex(data_hex.replace(" ", ""))
             self._do_write_did(did_id, data)
         except ValueError:

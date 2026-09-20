@@ -239,7 +239,10 @@ class DoipTransportLayer:
 
         Args:
             data: UDS请求数据
-            can_id: 忽略（兼容TransportLayer接口签名）
+            can_id: 可选目标逻辑地址覆盖（功能寻址一次性发送，
+                如保活广播）。传CAN标准功能地址0x7DF时自动映射为
+                DoIP功能组地址0xE400（ISO 13400-2 Table 27）；
+                不传用物理目标地址（路由激活协商值）
 
         Returns:
             发送成功返回True
@@ -248,13 +251,20 @@ class DoipTransportLayer:
             self._last_error = "DoIP未连接"
             return False
 
-        # 诊断消息: 源地址(2) + 目标地址(2) + UDS数据
+        # 诊断消息: 源地址(2) + 目标地址(2) + UDS数据。
+        # can_id覆盖仅对本次消息生效，不改_ecu_address——
+        # 后续物理寻址请求仍发往路由激活协商的ECU地址
+        target = self._ecu_address
+        if can_id is not None:
+            target = 0xE400 if can_id == 0x7DF else (can_id & 0xFFFF)
         payload = (struct.pack("!H", self._tester_address)
-                   + struct.pack("!H", self._ecu_address) + data)
+                   + struct.pack("!H", target) + data)
         if not self._send_frame(DoipPayloadType.DIAG_MESSAGE, payload):
             return False
 
-        self._notify_message("TX", data)
+        # 通知监听器时用实际目标地址（功能寻址时日志逻辑地址列
+        # 显示0xE400等功能组，而非物理ECU地址）
+        self._notify_message("TX", data, target)
         return True
 
     def receive_tp(self, timeout: float = None) -> Optional[bytes]:
@@ -338,9 +348,15 @@ class DoipTransportLayer:
         if callback in self._message_listeners:
             self._message_listeners.remove(callback)
 
-    def _notify_message(self, direction: str, uds_data: bytes):
-        """将UDS数据封装为CanMessage通知监听器（can_id用对端逻辑地址）"""
-        addr = self._ecu_address if direction == "TX" else self._tester_address
+    def _notify_message(self, direction: str, uds_data: bytes,
+                        addr: int = None):
+        """将UDS数据封装为CanMessage通知监听器（can_id用对端逻辑地址）
+
+        addr: TX方向可传实际目标地址（功能寻址功能组等）；
+        缺省TX=ECU地址（物理）、RX=Tester地址
+        """
+        if addr is None:
+            addr = self._ecu_address if direction == "TX" else self._tester_address
         msg = CanMessage(can_id=addr, data=uds_data,
                          direction=(CanDirection.TX if direction == "TX"
                                     else CanDirection.RX),

@@ -119,6 +119,21 @@ class ConnectionPanel(QWidget):
         self._doip_ecu_addr.setValue(0x1000)
         doip_form.addRow("ECU逻辑地址:", self._doip_ecu_addr)
 
+        # 功能组逻辑地址: 功能寻址广播（保活全车/会话保持）用。
+        # ISO 13400-2 Table 27标准功能组0xE400; 供0x7DF形式输入时
+        # 发送层自动映射（此处直接维护逻辑地址语义，不存CAN形式）
+        self._doip_func_addr = QSpinBox()
+        self._doip_func_addr.setRange(0, 0xFFFF)
+        self._doip_func_addr.setDisplayIntegerBase(16)
+        self._doip_func_addr.setPrefix("0x")
+        self._doip_func_addr.setValue(0xE400)
+        self._doip_func_addr.setToolTip(
+            "功能组逻辑地址（hex）: 功能寻址广播时的目标地址，\n"
+            "ISO 13400-2标准功能组为0xE400。\n"
+            "会话保持选“功能寻址”时按此地址广播保活，\n"
+            "同时保活网络内所有DoIP节点")
+        doip_form.addRow("功能组逻辑地址:", self._doip_func_addr)
+
         # 本地虚拟ECU回环（无真实ECU时的本机测试入口）
         self._doip_virtual_check = QCheckBox("本地虚拟ECU（回环模拟）")
         self._doip_virtual_check.setToolTip(
@@ -150,6 +165,19 @@ class ConnectionPanel(QWidget):
         self._rx_id.setValue(0x7E8)
         addr_row.addWidget(self._rx_id, 1)
         addr_form.addRow("诊断地址:", addr_row)
+
+        # 功能寻址ID: 会话保持等功能寻址广播（如3E广播保活全车）用。
+        # 默认跟随ECU定义（选中项目树ECU时同步），也可在此直接修改
+        self._func_id = QSpinBox()
+        self._func_id.setRange(0, 0x1FFFFFFF)  # 支持扩展帧29bit
+        self._func_id.setDisplayIntegerBase(16)
+        self._func_id.setPrefix("0x")
+        self._func_id.setValue(0x7DF)
+        self._func_id.setToolTip(
+            "功能寻址请求ID（hex，标准0x7DF）: 广播诊断请求时用，\n"
+            "如会话保持选“功能寻址”时同时保活总线上所有ECU。\n"
+            "选中项目树ECU时自动跟随其ECU定义（functional_tx_id）")
+        addr_form.addRow("功能寻址ID:", self._func_id)
 
         addr_group.setLayout(addr_form)
         layout.addWidget(addr_group)
@@ -303,6 +331,9 @@ class ConnectionPanel(QWidget):
         # 恢复UDS地址
         self._tx_id.setValue(self._parse_id(cfg.get("can.req_id"), 0x7E0))
         self._rx_id.setValue(self._parse_id(cfg.get("can.resp_id"), 0x7E8))
+        # 恢复功能寻址ID（未保存过时用标准默认0x7DF）
+        self._func_id.setValue(
+            self._parse_id(cfg.get("can.functional_id"), 0x7DF))
 
         # 恢复DoIP参数
         self._doip_ip.setText(str(cfg.get("doip.ip", "127.0.0.1")))
@@ -314,6 +345,8 @@ class ConnectionPanel(QWidget):
             self._parse_id(cfg.get("doip.tester_addr"), 0x0E80))
         self._doip_ecu_addr.setValue(
             self._parse_id(cfg.get("doip.ecu_addr"), 0x1000))
+        self._doip_func_addr.setValue(
+            self._parse_id(cfg.get("doip.functional_group"), 0xE400))
 
         # 恢复唤醒报文配置
         self._wake_can_id.setValue(
@@ -346,10 +379,12 @@ class ConnectionPanel(QWidget):
                 pass
             cfg.set("can.req_id", self._tx_id.value())
             cfg.set("can.resp_id", self._rx_id.value())
+            cfg.set("can.functional_id", self._func_id.value())
             cfg.set("doip.ip", self._doip_ip.text().strip() or "127.0.0.1")
             cfg.set("doip.port", self._doip_port.value())
             cfg.set("doip.tester_addr", self._doip_tester_addr.value())
             cfg.set("doip.ecu_addr", self._doip_ecu_addr.value())
+            cfg.set("doip.functional_group", self._doip_func_addr.value())
             # 保存唤醒报文配置
             cfg.set("wake.can_id", self._wake_can_id.value())
             cfg.set("wake.data", self._wake_data.text().strip() or "FF FF FF FF FF FF FF FF")
@@ -672,6 +707,24 @@ class ConnectionPanel(QWidget):
         """由外部（如项目树选中ECU）注入UDS地址"""
         self._tx_id.setValue(tx_id)
         self._rx_id.setValue(rx_id)
+
+    def set_functional_id(self, value: int):
+        """由外部（如项目树选中ECU）注入功能寻址ID
+
+        同时同步两个硬件组: CAN功能ID直接设值; DoIP功能组
+        逻辑地址做0x7DF→0xE400标准映射（其余值视为逻辑地址）
+        """
+        if value is None:
+            return
+        self._func_id.setValue(int(value) & 0x1FFFFFFF)
+        mapped = 0xE400 if value == 0x7DF else (int(value) & 0xFFFF)
+        self._doip_func_addr.setValue(mapped)
+
+    @property
+    def functional_id(self) -> int:
+        """当前硬件类型下的功能寻址ID（CAN→功能CAN ID，DoIP→功能组逻辑地址）"""
+        return (self._doip_func_addr.value() if self.is_doip
+                else self._func_id.value())
 
     @property
     def can_interface(self):

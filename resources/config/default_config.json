@@ -2,11 +2,12 @@
   "version": "1.0.0",
   "created": "2026-08-29T00:00:00",
   "can": {
-    "interface_type": "pcan",
-    "channel": "PCAN_USBBUS1",
+    "interface_type": "doip",
+    "channel": "",
     "bitrate": 500000,
-    "req_id": 1813,
-    "resp_id": 1941
+    "req_id": 1812,
+    "resp_id": 1940,
+    "functional_id": 2015
   },
   "ecus": [
     {
@@ -18,7 +19,9 @@
   ],
   "session": {
     "auto_tester_present": true,
-    "tester_present_interval_ms": 2000
+    "tester_present_interval_ms": 2000,
+    "tester_present_functional": false,
+    "tester_present_suppress": true
   },
   "log": {
     "level": "DEBUG",
@@ -29,9 +32,9 @@
     "timestamp_mode": "absolute",
     "log_dock_height": 321
   },
-  "modified": "2026-09-10T16:14:37.394483",
+  "modified": "2026-09-18T16:15:52.011653",
   "project": {
-    "current_ecu": "DEM",
+    "current_ecu": "DASH",
     "hidden_ecus": [],
     "recent": [
       "d:\\DiagTools\\resources\\config\\default_config.json"
@@ -45,7 +48,8 @@
     "ip": "127.0.0.1",
     "port": 13400,
     "tester_addr": 3712,
-    "ecu_addr": 4096
+    "ecu_addr": 4096,
+    "functional_group": 58368
   },
   "wake": {
     "can_id": 352,
@@ -53,6 +57,9 @@
     "repeat": 20,
     "interval": 100,
     "period": 100,
-    "auto": true
+    "auto": false
+  },
+  "imports": {
+    "did_dtc": "D:/FB63_VCDM_UDSonCAN_Diagnostic_Specification_V1.1_20260323.xlsx"
   }
 }

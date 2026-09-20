@@ -132,6 +132,11 @@ class DtcManager:
     def dtc_count(self) -> int:
         return len(self._current_dtcs)
 
+    @property
+    def definitions(self) -> dict[int, str]:
+        """已加载的DTC定义（dtc_id -> 描述），供面板下拉选择"""
+        return dict(self._dtc_definitions)
+
     def load_definitions(self, file_path: str) -> int:
         """加载DTC定义文件（JSON格式: 纯列表或含dtcs键的对象）"""
         try:
@@ -163,6 +168,10 @@ class DtcManager:
     def get_definition(self, dtc_id: int) -> str:
         """查询单个DTC的描述定义"""
         return self._dtc_definitions.get(dtc_id, "")
+
+    def clear_definitions(self):
+        """清空全部DTC定义（切换调查表/ECU时替换语义用）"""
+        self._dtc_definitions.clear()
 
     def refresh_current_definitions(self):
         """定义更新后回填当前记录描述（已读取的DTC立即显示名称）"""
@@ -215,8 +224,31 @@ class DtcManager:
             self._current_dtcs = {r.dtc_id: r for r in records}
 
         elif sub_func == 0x01:
-            # DTC数量
-            self._dtc_count = response[3] if len(response) > 3 else 0
+            # DTC数量: 59 01 <可用掩码1B> <格式标识1B> <计数2B>
+            # （resp[4:6]为计数；resp[3]是格式标识不进计数）
+            # 部分ECU在计数后附带DTC明细（每条3字节DTC+1字节状态），
+            # 一并解析为记录供面板显示
+            if len(response) >= 6:
+                self._dtc_count = (response[4] << 8) | response[5]
+            else:
+                self._dtc_count = 0
+            data = response[6:]
+            i = 0
+            while i + 4 <= len(data):
+                dtc_id = (data[i] << 16) | (data[i + 1] << 8) | data[i + 2]
+                status = data[i + 3]
+                i += 4
+                definition = self._dtc_definitions.get(dtc_id, "")
+                record = DtcRecord(dtc_id, status, definition=definition)
+                self._update_timeline(dtc_id, status)
+                records.append(record)
+            if records:
+                new_dtc_ids = {r.dtc_id for r in records}
+                for dtc_id in list(self._current_dtcs.keys()):
+                    if dtc_id not in new_dtc_ids:
+                        self._timeline.append(
+                            DtcTimelineEntry(dtc_id, "disappeared", 0))
+                self._current_dtcs = {r.dtc_id: r for r in records}
 
         elif sub_func == 0x04:
             # 快照数据
@@ -230,6 +262,20 @@ class DtcManager:
 
         self._logger.info(f"解析到 {len(records)} 个DTC记录")
         return records
+
+    def parse_dtc_count(self, response: bytes) -> Optional[int]:
+        """解析ReportNumberOfDTC(0x19 0x01)响应中的DTC数量
+
+        格式: 59 01 <可用性掩码1B> <格式标识1B> <计数2B>
+        （resp[2]=可用掩码, resp[3]=格式标识, resp[4:6]=计数）
+
+        Returns:
+            DTC数量；响应格式不符返回 None
+        """
+        if (not response or len(response) < 6 or response[0] != 0x59
+                or response[1] != 0x01):
+            return None
+        return (response[4] << 8) | response[5]
 
     def _update_timeline(self, dtc_id: int, new_status: int):
         """更新DTC时间线"""

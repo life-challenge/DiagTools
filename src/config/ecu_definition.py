@@ -47,6 +47,8 @@ class EcuDefinition:
     functional_tx_id: int = 0x7DF
     # 信息DID: {显示名: DID十六进制字符串}，用于ECU信息卡读取
     info_dids: dict = field(default_factory=dict)
+    # 关联诊断调查表路径（xlsx/json）: 切换到该ECU时自动加载其定义库
+    survey: str = ""
     # 特殊功能: [{name, type(routine/did/reset/raw), id, reset_type, data, description}]
     special_functions: list = field(default_factory=list)
     # 定义文件所在目录（后续可扩展 did.json / dtc.json / flash.json 等）
@@ -105,6 +107,7 @@ def load_ecu_definitions(base_dir: str = None) -> list:
                 functional_tx_id=_parse_id(
                     data.get("functional_tx_id"), 0x7DF),
                 info_dids=data.get("info_dids", {}) or {},
+                survey=data.get("survey", "") or "",
                 special_functions=data.get("special_functions") or [],
                 def_dir=os.path.join(base_dir, entry),
             ))

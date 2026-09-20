@@ -39,6 +39,12 @@ class UdsClient:
         self._p2_star_timeout = p2_star_timeout
         self._tester_present_timer: Optional[threading.Timer] = None
         self._tester_present_running = False
+        # 功能寻址ID（None=物理寻址）。DoCAN=功能CAN ID（标准0x7DF），
+        # DoIP=功能组逻辑地址（标准0xE400）。由会话面板按配置设置
+        self.functional_id: Optional[int] = None
+        # 保活参数（start_tester_present时更新）
+        self._tp_suppress = True   # 抑制正响应(3E 80)，ECU不回复
+        self._tp_functional = False  # True=按功能寻址广播保活
         self._lock = threading.Lock()
         self._logger = get_log_manager().get_diag_logger()
 
@@ -64,13 +70,17 @@ class UdsClient:
         self._tp.rx_id = value
 
     def send_raw(self, data: bytes, timeout: float = None,
-                 wait_response: bool = True) -> Optional[bytes]:
+                 wait_response: bool = True,
+                 tx_id_override: int = None) -> Optional[bytes]:
         """发送原始UDS请求并等待响应
         
         Args:
             data: 请求数据
             timeout: 超时时间（秒）
             wait_response: False时发送后不等待（用于抑制正响应的请求）
+            tx_id_override: 可选目标地址覆盖（功能寻址一次性发送，
+                DoCAN=功能CAN ID如0x7DF，DoIP=功能组逻辑地址如0xE400，
+                不改物理寻址配置）
             
         Returns:
             响应数据，超时返回None
@@ -89,7 +99,7 @@ class UdsClient:
 
             self._log_request(data)
 
-            if not self._tp.send_tp(data):
+            if not self._tp.send_tp(data, can_id=tx_id_override):
                 self._logger.error(f"发送失败: {self._bytes_to_hex(data)}")
                 return None
 
@@ -206,13 +216,21 @@ class UdsClient:
         req = UdsService.encode_request_transfer_exit()
         return self.send_raw(req)
 
-    def tester_present(self, suppress_response: bool = False) -> Optional[bytes]:
-        """TesterPresent保活"""
+    def tester_present(self, suppress_response: bool = False,
+                       functional: bool = False) -> Optional[bytes]:
+        """TesterPresent保活
+
+        Args:
+            suppress_response: True发送3E 80（抑制正响应，ECU不回复）
+            functional: True按功能寻址ID发送（self.functional_id，
+                同时保活总线上所有ECU；DoIP下0x7DF自动映射0xE400）
+        """
         data = UdsService.encode_tester_present(suppress_response)
+        can_id = self.functional_id if (functional and self.functional_id) else None
         if suppress_response:
             # 抑制正响应: ECU不回复，发送后无需等待（也避免占用接收队列）
-            return self.send_raw(data, wait_response=False)
-        return self.send_raw(data)
+            return self.send_raw(data, wait_response=False, tx_id_override=can_id)
+        return self.send_raw(data, tx_id_override=can_id)
 
     def control_dtc_setting(self, on: bool = True) -> Optional[bytes]:
         """DTC设置控制"""
@@ -241,8 +259,18 @@ class UdsClient:
 
     # --- TesterPresent 保活 ---
 
-    def start_tester_present(self, interval_ms: int = 2000):
-        """启动TesterPresent自动保活"""
+    def start_tester_present(self, interval_ms: int = 2000,
+                             suppress: bool = True, functional: bool = False):
+        """启动TesterPresent自动保活
+
+        Args:
+            interval_ms: 发送间隔（毫秒）
+            suppress: 抑制正响应（3E 80，ECU不回复，总线干净——默认）
+            functional: True按功能寻址ID广播保活（同时保活总线上
+                所有ECU；需先设置self.functional_id）
+        """
+        self._tp_suppress = suppress
+        self._tp_functional = functional
         self.stop_tester_present()
         self._tester_present_running = True
         self._schedule_tester_present(interval_ms)
@@ -268,7 +296,8 @@ class UdsClient:
     def _send_tester_present(self, interval_ms: int):
         if self._tester_present_running and self._is_transport_connected():
             try:
-                self.tester_present(suppress_response=True)
+                self.tester_present(suppress_response=self._tp_suppress,
+                                    functional=self._tp_functional)
             except Exception:
                 pass
             self._schedule_tester_present(interval_ms)

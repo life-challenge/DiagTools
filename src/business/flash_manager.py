@@ -204,6 +204,11 @@ class FlashConfig:
         self.erase_format_byte = 0x44
         # 擦除块大小: 擦除一般按整块进行，擦除大小向上取整到该值的整数倍（默认0x40000）
         self.erase_block_size = 0x40000
+        # 可选步骤 —— 擦除内存(0x31 01 FF00): 部分ECU在请求下载(0x34)时
+        # 自动擦除，或调试场景不希望破坏原有数据，可关闭
+        self.erase_memory = True
+        # 压测: 连续刷写轮数（>1时单轮失败记录后继续，结束后输出汇总）
+        self.repeat_count = 1
         self.security_level = 9          # 0=跳过安全访问（量产流程常用 9，即 27 09/0A）
         self.key_generator = None        # Callable[[int, bytes], bytes] 密钥钩子 (level, seed)->key
         self.enter_programming = True    # 刷写前切换编程会话(0x10 02)
@@ -259,6 +264,8 @@ class FlashProgress:
         self.elapsed_time = 0.0
         self.error_message = ""
         self.transfer_kind = "app"       # "app"=应用传输(计入进度) "driver"=驱动传输
+        self.repeat_current = 1          # 压测当前轮次（刷写线程写入，GUI读取）
+        self.repeat_total = 1            # 压测总轮次
 
     @property
     def percentage(self) -> float:
@@ -319,6 +326,8 @@ class FlashManager:
         self._logger = get_log_manager().get_flash_logger()
         self._progress_callback: Optional[Callable] = None
         self._state_callback: Optional[Callable] = None
+        self._last_fail_key = ""        # 最近一轮失败步骤（压测汇总终态用）
+        self._last_fail_name = ""
 
     @property
     def config(self) -> FlashConfig:
@@ -375,8 +384,10 @@ class FlashManager:
             seq.append("driver")
         if config.write_fingerprint:
             seq.append("fingerprint")
-        # 刷写主体
-        seq += ["erase", "download", "transfer", "transfer_exit"]
+        # 刷写主体（擦除可选: 部分ECU请求下载时自动擦除）
+        if config.erase_memory:
+            seq.append("erase")
+        seq += ["download", "transfer", "transfer_exit"]
         # 刷后检查与复位
         if config.check_integrity:
             seq.append("check_integrity")
@@ -429,10 +440,10 @@ class FlashManager:
             self._state_callback(state, error_msg, key)
 
     def _flash_thread(self):
-        """刷写线程: 按配置驱动的步骤序列依次执行"""
+        """刷写线程: 按配置驱动的步骤序列依次执行（支持多轮压测）"""
         self._running = True
-        self._progress = FlashProgress()
-        self._progress.start_time = time.time()
+        repeat = max(1, int(getattr(self._config, "repeat_count", 1) or 1))
+        ok_count = fail_count = 0
 
         handlers = {
             "precheck": self._step_precheck,
@@ -460,15 +471,62 @@ class FlashManager:
         }
 
         try:
-            self._logger.info("=== 刷写开始 ===")
+            for rnd in range(1, repeat + 1):
+                if self._cancelled:
+                    break
+                # 每轮重置进度（进度条/耗时归零重新累计）
+                self._progress = FlashProgress()
+                self._progress.start_time = time.time()
+                self._progress.repeat_current = rnd
+                self._progress.repeat_total = repeat
+                if repeat > 1:
+                    self._logger.info(
+                        f"=== 压测第 {rnd}/{repeat} 轮开始 ===")
+                result = self._run_one_flash(handlers)
+                if result == "completed":
+                    ok_count += 1
+                elif result == "cancelled":
+                    break
+                else:
+                    fail_count += 1
+                if rnd < repeat:
+                    time.sleep(1.0)  # 轮间间隔: 等ECU完成复位/通信栈恢复
+
+            # 统一终态（单轮模式与原行为一致）
+            if self._cancelled:
+                self._set_state(FlashState.CANCELLED, "", "")
+            elif fail_count:
+                if repeat > 1:
+                    msg = (f"压测汇总: {ok_count}成功/{fail_count}失败"
+                           f"/共{repeat}轮")
+                else:
+                    msg = f"{self._last_fail_name}失败"
+                self._set_state(FlashState.FAILED, msg,
+                                self._last_fail_key)
+            else:
+                summary = (f"压测汇总: {ok_count}/{repeat}轮全部成功"
+                           if repeat > 1 else "")
+                self._set_state(FlashState.COMPLETED, summary, "result")
+            if repeat > 1:
+                self._logger.info(
+                    f"=== 压测结束: {ok_count}成功/{fail_count}失败"
+                    f"/共{repeat}轮 ===")
+        finally:
+            self._running = False
+
+    def _run_one_flash(self, handlers) -> str:
+        """执行单轮刷写步骤序列（不发送终态，由压测外层统一上报）
+
+        Returns: "completed" / "failed" / "cancelled"
+        """
+        try:
             self._logger.info(f"文件: {self._config.file_path}")
 
             for key, name, _desc in self.steps(self._config):
                 if key == "result":
                     break
                 if self._cancelled:
-                    self._set_state(FlashState.CANCELLED, "", key)
-                    return
+                    return "cancelled"
                 self._set_state(self._STEP_STATES[key], "", key)
                 self._logger.info(f"[{name}] 开始")
                 # 返回: True=成功, False=失败, None=按配置跳过
@@ -477,19 +535,23 @@ class FlashManager:
                     self._logger.info(f"[{name}] 跳过")
                     continue
                 if not ret:
-                    self._set_state(FlashState.FAILED, f"{name}失败", key)
-                    return
+                    self._logger.error(f"[{name}] 失败")
+                    self._last_fail_key = key
+                    self._last_fail_name = name
+                    return "failed"
                 self._logger.info(f"[{name}] OK")
 
-            self._set_state(FlashState.COMPLETED, "", "result")
             total_time = time.time() - self._progress.start_time
-            self._logger.info(f"=== 刷写成功 === 总耗时: {total_time:.1f}s")
+            self._logger.info(
+                f"=== 单轮刷写成功 === 耗时: {total_time:.1f}s")
+            return "completed"
 
         except Exception as e:
-            self._set_state(FlashState.FAILED, str(e), "")
+            # 不发终态: 压测中间轮的异常由外层统一汇总上报
             self._logger.error(f"刷写异常: {e}")
-        finally:
-            self._running = False
+            self._last_fail_key = ""
+            self._last_fail_name = f"异常({e})"
+            return "failed"
 
     # ---------------- 功能寻址 ----------------
 

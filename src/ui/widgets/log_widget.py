@@ -8,6 +8,7 @@ from PyQt6.QtWidgets import (
 from PyQt6.QtCore import Qt, pyqtSignal, QMutex, QTimer
 from PyQt6.QtGui import QColor, QFont
 from datetime import datetime
+import struct
 import time
 
 
@@ -85,8 +86,11 @@ class LogWidget(QWidget):
         self._flush_timer.setInterval(self._FLUSH_INTERVAL_MS)
         self._flush_timer.timeout.connect(self._flush_pending)
         # DoIP会话逻辑地址上下文: (tester_addr, ecu_addr)，
-        # 供pcap导出重建以太网帧；CAN会话为None
+        # 供pcap导出重建以太网帧；CAN会话为None。
+        # _doip_frame_view: True=传输层视图拼完整DoIP帧（DoIP Trace），
+        # False=会话层视图保持纯UDS（UDS Trace）
         self._doip_context = None
+        self._doip_frame_view = True
 
         self._init_ui()
         self._connect_signals()
@@ -219,16 +223,24 @@ class LogWidget(QWidget):
         entry = LogEntry(time.time(), direction, can_id, data, description, is_error)
         self.message_received.emit(entry)
 
-    def set_doip_context(self, tester_addr: int, ecu_addr: int):
+    def set_doip_context(self, tester_addr: int, ecu_addr: int,
+                          frame_view: bool = True):
         """设置DoIP会话逻辑地址（pcap导出时重建以太网帧用）；
-        ID列同时改为"逻辑地址"——DoIP下该列显示的是逻辑地址而非CAN ID"""
+        ID列同时改为"逻辑地址"——DoIP下该列显示的是逻辑地址而非CAN ID。
+
+        frame_view: True=传输层视图（DoIP Trace），数据列拼完整
+        DoIP帧（02 FD 80 01...）；False=会话层视图（UDS Trace），
+        数据列保持纯UDS数据（14229诊断内容，不带传输层头）
+        """
         self._doip_context = (tester_addr, ecu_addr)
+        self._doip_frame_view = frame_view
         self._table.setHorizontalHeaderItem(2, QTableWidgetItem("逻辑地址"))
         self._filter_id.setToolTip("逻辑地址过滤: 单个(1000/0x1000)或范围(1000-0E80)")
 
     def clear_doip_context(self):
         """清除DoIP上下文（断开连接时调用），ID列恢复CAN语义"""
         self._doip_context = None
+        self._doip_frame_view = True
         self._table.setHorizontalHeaderItem(2, QTableWidgetItem("CAN ID"))
         self._filter_id.setToolTip("CAN ID过滤: 单个(714/0x714)或范围(714-794)")
 
@@ -317,8 +329,14 @@ class LogWidget(QWidget):
         id_item.setFont(self._MONO_FONT)
         id_item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
 
-        # 数据（超长报文截断显示，全量保留在entry.data供导出/复制）
-        data_item = QTableWidgetItem(entry.display_hex)
+        # 数据（超长报文截断显示，全量保留在entry.data供导出/复制）。
+        # DoIP传输层视图显示完整DoIP诊断消息帧（含头+源/目标逻辑
+        # 地址）；UDS会话层视图（frame_view=False）保持纯UDS——
+        # 存储层始终为裸UDS（pcap导出重建以太网帧依赖此语义）
+        if self._doip_context is not None and self._doip_frame_view:
+            data_item = QTableWidgetItem(self._doip_frame_hex(entry))
+        else:
+            data_item = QTableWidgetItem(entry.display_hex)
         data_item.setFont(self._MONO_FONT)
         if len(entry.data) > LogEntry.DISPLAY_MAX_BYTES:
             data_item.setToolTip(entry.data_hex[:512])
@@ -341,6 +359,28 @@ class LogWidget(QWidget):
         self._table.setItem(row, 2, id_item)
         self._table.setItem(row, 3, data_item)
         self._table.setItem(row, 4, desc_item)
+
+    def _doip_frame_hex(self, entry: LogEntry) -> str:
+        """DoIP会话数据列: 显示完整DoIP诊断消息帧（ISO 13400-2 0x8001）
+
+        02 FD 80 01 <长度4> <源2> <目标2> <UDS数据>——与trace_exporter
+        重建pcap的帧格式一致（版本0x02）。TX源=Tester目标=ECU，
+        RX反向。仅显示层拼帧，entry.data仍为裸UDS
+        """
+        tester, ecu = self._doip_context
+        if entry.direction == "TX":
+            src, dst = tester, ecu
+        else:
+            src, dst = ecu, tester
+        payload = struct.pack("!HH", src, dst) + entry.data
+        frame = (bytes([0x02, 0xFD, 0x80, 0x01])
+                 + struct.pack("!I", len(payload)) + payload)
+        # 超长截断: 帧头12字节全显示，UDS数据按显示阈值截断
+        if len(frame) > 12 + LogEntry.DISPLAY_MAX_BYTES:
+            shown = " ".join(f"{b:02X}" for b in
+                             frame[:12 + LogEntry.DISPLAY_MAX_BYTES])
+            return f"{shown} ... ({len(frame)}B)"
+        return " ".join(f"{b:02X}" for b in frame)
 
     def _format_time(self, entry: LogEntry) -> str:
         mode = self._time_mode.currentText()

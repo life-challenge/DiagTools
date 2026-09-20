@@ -6,7 +6,7 @@
   ECU信息卡（§5）: 三状态区（ECU状态/通信状态/诊断状态）
                     + ECU信息（字段双列，[读取ECU信息]右上角）
                     + 通信信息（VCI/通道/波特率/TX RX/协议 竖排列表）
-  高级诊断子Tab: UDS服务 / 会话控制 / 安全访问 / Sequence
+  高级诊断子Tab: 诊断控制台 / 会话保持 / 安全访问 / Sequence
 """
 
 from PyQt6.QtWidgets import (QWidget, QVBoxLayout, QHBoxLayout, QGridLayout,
@@ -36,11 +36,14 @@ class DiagnosticView(QWidget):
 
     # 快捷入口条定义: 图标 + 名称（§6 功能页签的快捷入口形式）
     # 安全算法为高级诊断子Tab的直达入口: 诊断/序列/刷写均依赖算法加载，
-    # 从三级路径（高级诊断→Security Access）提升为一级快捷入口
+    # 从三级路径（高级诊断→Security Access）提升为一级快捷入口；
+    # 会话保持同理提升（3E保活使用频率高，不再埋三级路径）；
+    # 名称突出 3E TesterPresent 会话保持用途（面板内含会话切换+保活）
     _QUICK_ENTRIES = [
         ("📋", "ECU信息"), ("⚠", "故障码 DTC"), ("📈", "数据流"),
         ("🔍", "DID"), ("🎛", "IO控制"), ("⚙", "例程 Routine"),
-        ("⭐", "特殊功能"), ("🧰", "高级诊断"), ("🔐", "安全算法"),
+        ("⭐", "特殊功能"), ("🧰", "高级诊断"), ("🕒", "会话保持"),
+        ("🔐", "安全算法"),
     ]
 
     def __init__(self, parent=None):
@@ -112,8 +115,8 @@ class DiagnosticView(QWidget):
         self._sequence_panel = SequencePanel()
         self._adv_tabs = QTabWidget()
         adv_tabs = self._adv_tabs
-        adv_tabs.addTab(self._uds_service_view, "UDS服务")
-        adv_tabs.addTab(self._session_panel, "Session 会话控制")
+        adv_tabs.addTab(self._uds_service_view, "诊断控制台")
+        adv_tabs.addTab(self._session_panel, "Session 会话保持")
         adv_tabs.addTab(self._security_panel, "Security Access")
         adv_tabs.addTab(self._sequence_panel, "Sequence")
 
@@ -131,6 +134,7 @@ class DiagnosticView(QWidget):
                            (self._routine_panel, "例程"),
                            (self._session_panel, "会话"),
                            (self._security_panel, "安全访问"),
+                           (self._uds_service_view, "诊断控制台"),
                            (self._sequence_panel, "序列")):
             panel.business_log.connect(
                 lambda msg, lv, t=tag: self.business_log.emit(f"[{t}] {msg}", lv))
@@ -315,6 +319,22 @@ class DiagnosticView(QWidget):
     def did_panel(self) -> DidPanel:
         return self._did_panel
 
+    @property
+    def datastream_panel(self):
+        return self._datastream_panel
+
+    @property
+    def io_panel(self):
+        return self._io_panel
+
+    @property
+    def routine_panel(self):
+        return self._routine_panel
+
+    @property
+    def uds_service_view(self):
+        return self._uds_service_view
+
     def set_uds_client(self, client):
         self._uds_client = client
         for panel in self.panels:
@@ -378,11 +398,23 @@ class DiagnosticView(QWidget):
 
     def set_connection_info(self, interface_name: str, channel_info: str,
                             bitrate: int, tx_id: int, rx_id: int):
-        """连接成功后更新通信信息区与通信状态区"""
+        """连接成功后更新通信信息区与通信状态区
+
+        协议随传输类型切换: DoIP直接承载UDS（无ISO-TP分段），
+        CAN经ISO-15765-2（ISO-TP）分段——不能停留在初始默认的
+        CAN描述上，否则DoIP连接后协议栏仍显示旧值。
+        """
         self._lbl_vci.setText(interface_name or "--")
         self._lbl_bus.setText(channel_info or "--")
         self._lbl_bitrate.setText(f"{bitrate // 1000} kbps" if bitrate else "--")
-        self._lbl_addr.setText(f"0x{tx_id:03X} / 0x{rx_id:03X}")
+        is_doip = (interface_name or "").upper() == "DOIP"
+        # DoIP逻辑地址4位宽（0x1000/0x0E80），CAN ID 3位宽（0x714）
+        width = 4 if is_doip else 3
+        self._lbl_addr.setText(
+            f"0x{tx_id:0{width}X} / 0x{rx_id:0{width}X}")
+        self._lbl_proto.setText(
+            "DoIP (ISO 13400) + UDS" if is_doip
+            else "CAN + ISO-TP + UDS")
         # 通信状态区: VCI + 通道/波特率（§5）
         self._st_comm_v1.setText(interface_name or "--")
         self._st_comm_v2.setText(
@@ -416,12 +448,13 @@ class DiagnosticView(QWidget):
     def _select_quick(self, name: str):
         """快捷入口切换: 高亮当前入口按钮，切换面板堆栈
 
-        安全算法为高级诊断子Tab的直达入口: 堆栈切到高级诊断页并选中
-        Security Access子Tab（复用同一面板实例，不重复创建）。
+        会话保持/安全算法为高级诊断子Tab的直达入口: 堆栈切到高级诊断页
+        并选中对应子Tab（复用同一面板实例，不重复创建）。
         """
-        if name == "安全算法":
+        adv_tab_index = {"会话保持": 1, "安全算法": 2}.get(name)
+        if adv_tab_index is not None:
             self._stack.setCurrentWidget(self._adv_tabs)
-            self._adv_tabs.setCurrentIndex(2)
+            self._adv_tabs.setCurrentIndex(adv_tab_index)
         else:
             for i, (_icon, n) in enumerate(self._QUICK_ENTRIES):
                 if n == name:
